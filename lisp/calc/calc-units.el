@@ -1,6 +1,6 @@
 ;;; calc-units.el --- unit conversion functions for Calc
 
-;; Copyright (C) 1990-1993, 2001-2013 Free Software Foundation, Inc.
+;; Copyright (C) 1990-1993, 2001-2015 Free Software Foundation, Inc.
 
 ;; Author: David Gillespie <daveg@synaptics.com>
 ;; Maintainer: Jay Belanger <jay.p.belanger@gmail.com>
@@ -404,7 +404,7 @@ If EXPR is nil, return nil."
            (math-composition-to-string cexpr))))))
 
 (defvar math-default-units-table
-  #s(hash-table test equal data (1 (1)))
+  (make-hash-table :test 'equal)
   "A table storing previously converted units.")
 
 (defun math-get-default-units (expr)
@@ -437,20 +437,34 @@ If COMP or STD is non-nil, put that in the units table instead."
                  (list new-units (car default-units))
                  math-default-units-table))))))
 
+(defvar calc-allow-units-as-numbers t)
+
 (defun calc-convert-units (&optional old-units new-units)
   (interactive)
   (calc-slow-wrapper
    (let ((expr (calc-top-n 1))
 	 (uoldname nil)
+         (unitscancel nil)
+         (nouold nil)
 	 unew
          units
          defunits)
-     (unless (math-units-in-expr-p expr t)
+     (if (or (not (math-units-in-expr-p expr t))
+             (setq unitscancel (and
+                                (if (get 'calc-allow-units-as-numbers 'saved-value)
+                                    (car (get 'calc-allow-units-as-numbers 'saved-value))
+                                  calc-allow-units-as-numbers)
+                                (eq (math-get-standard-units expr) 1))))
        (let ((uold (or old-units
 		       (progn
-			 (setq uoldname (read-string "Old units: "))
+			 (setq uoldname 
+                               (if unitscancel
+                                   (read-string 
+                                    "(The expression is unitless when simplified) Old Units: ")
+                                 (read-string "Old units: ")))
 			 (if (equal uoldname "")
 			     (progn
+                               (setq nouold unitscancel)
 			       (setq uoldname "1")
 			       1)
 			   (if (string-match "\\` */" uoldname)
@@ -460,47 +474,45 @@ If COMP or STD is non-nil, put that in the units table instead."
 	   (error "Bad format in units expression: %s" (nth 1 uold)))
 	 (setq expr (math-mul expr uold))))
      (setq defunits (math-get-default-units expr))
-     (if (equal defunits "1")
-         (progn
-           (calc-enter-result 1 "cvun" (math-simplify-units expr))
-           (message "All units in expression cancel"))
-       (unless new-units
-         (setq new-units
-               (read-string (concat
-                             (if uoldname
-                                 (concat "Old units: "
-                                         uoldname
-                                         ", new units")
-                               "New units")
-                             (if defunits
-                                 (concat
-                                  " (default "
-                                  defunits
-                                  "): ")
-                               ": "))))
-         (if (and
-              (string= new-units "")
-              defunits)
-             (setq new-units defunits)))
-       (when (string-match "\\` */" new-units)
-         (setq new-units (concat "1" new-units)))
-       (setq units (math-read-expr new-units))
-       (when (eq (car-safe units) 'error)
-         (error "Bad format in units expression: %s" (nth 2 units)))
-       (if calc-ensure-consistent-units
-           (math-check-unit-consistency expr units))
-       (let ((unew (math-units-in-expr-p units t))
-             (std (and (eq (car-safe units) 'var)
-                       (assq (nth 1 units) math-standard-units-systems)))
-             (comp (eq (car-safe units) '+)))
-	 (unless (or unew std)
-	   (error "No units specified"))
-         (let ((res
-                (if std
-                    (math-simplify-units (math-to-standard-units expr (nth 1 std)))
-                  (math-convert-units expr units (and uoldname (not (equal uoldname "1")))))))
-           (math-put-default-units res (if comp units))
-           (calc-enter-result 1 "cvun" res)))))))
+     (unless new-units
+       (setq new-units
+             (read-string (concat
+                           (if (and uoldname (not nouold))
+                               (concat "Old units: "
+                                       uoldname
+                                       ", new units")
+                             "New units")
+                           (if defunits
+                               (concat
+                                " (default "
+                                defunits
+                                "): ")
+                             ": "))))
+       (if (and
+            (string= new-units "")
+            defunits)
+           (setq new-units defunits)))
+     (when (string-match "\\` */" new-units)
+       (setq new-units (concat "1" new-units)))
+     (setq units (math-read-expr new-units))
+     (when (eq (car-safe units) 'error)
+       (error "Bad format in units expression: %s" (nth 2 units)))
+     (if calc-ensure-consistent-units
+         (math-check-unit-consistency expr units))
+     (let ((unew (math-units-in-expr-p units t))
+           (std (and (eq (car-safe units) 'var)
+                     (assq (nth 1 units) math-standard-units-systems)))
+           (comp (eq (car-safe units) '+)))
+       (unless (or unew std)
+         (error "No units specified"))
+       (let* ((noold (and uoldname (not (equal uoldname "1"))))
+              (res
+               (if std
+                   (math-simplify-units (math-to-standard-units expr (nth 1 std)))
+                 (math-convert-units expr units noold))))
+         (unless std
+           (math-put-default-units (if noold units res) (if comp units)))
+         (calc-enter-result 1 "cvun" res))))))
 
 (defun calc-autorange-units (arg)
   (interactive "P")
@@ -892,10 +904,12 @@ If COMP or STD is non-nil, put that in the units table instead."
   (and (consp expr)
        (if (eq (car expr) 'var)
 	   (math-check-unit-name expr)
-	 (and (or sub-exprs
-		  (memq (car expr) '(* / ^)))
-	      (or (math-units-in-expr-p (nth 1 expr) sub-exprs)
-		  (math-units-in-expr-p (nth 2 expr) sub-exprs))))))
+	 (if (eq (car expr) 'neg)
+	     (math-units-in-expr-p (nth 1 expr) sub-exprs)
+	   (and (or sub-exprs
+		    (memq (car expr) '(* / ^)))
+		(or (math-units-in-expr-p (nth 1 expr) sub-exprs)
+		    (math-units-in-expr-p (nth 2 expr) sub-exprs)))))))
 
 (defun math-only-units-in-expr-p (expr)
   (and (consp expr)
@@ -912,6 +926,8 @@ If COMP or STD is non-nil, put that in the units table instead."
   (cond ((math-scalarp expr) nil)
 	((eq (car expr) 'var)
 	 (math-check-unit-name expr))
+	((eq (car expr) 'neg)
+	 (math-single-units-in-expr-p (nth 1 expr)))
 	((eq (car expr) '*)
 	 (let ((u1 (math-single-units-in-expr-p (nth 1 expr)))
 	       (u2 (math-single-units-in-expr-p (nth 2 expr))))
@@ -1067,6 +1083,8 @@ If COMP or STD is non-nil, put that in the units table instead."
 	((eq (car-safe expr) '/)
 	 (or (math-find-compatible-unit-rec (nth 1 expr) pow)
 	     (math-find-compatible-unit-rec (nth 2 expr) (- pow))))
+	((eq (car-safe expr) 'neg)
+	 (math-find-compatible-unit-rec (nth 1 expr) pow))
 	((and (eq (car-safe expr) '^)
 	      (integerp (nth 2 expr)))
 	 (math-find-compatible-unit-rec (nth 1 expr) (* pow (nth 2 expr))))
@@ -1485,10 +1503,10 @@ If COMP or STD is non-nil, put that in the units table instead."
    ((memq (car-safe expr) '(* /))
     (cons (car expr)
           (mapcar 'math-extract-units (cdr expr))))
-   ((and
-     (eq (car-safe expr) '^)
-     (math-check-unit-name (nth 1 expr)))
-    expr)
+   ((eq (car-safe expr) 'neg)
+    (math-extract-units (nth 1 expr)))
+   ((eq (car-safe expr) '^)
+    (list '^ (math-extract-units (nth 1 expr)) (nth 2 expr)))
    ((math-check-unit-name expr) expr)
    (t 1)))
 

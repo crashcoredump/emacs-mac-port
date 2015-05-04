@@ -1,5 +1,5 @@
 ;;; reftex.el --- minor mode for doing \label, \ref, \cite, \index in LaTeX
-;; Copyright (C) 1997-2000, 2003-2013 Free Software Foundation, Inc.
+;; Copyright (C) 1997-2000, 2003-2015 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <dominik@science.uva.nl>
 ;; Maintainer: auctex-devel@gnu.org
@@ -135,7 +135,9 @@
  "Make a citation using BibTeX database files." t)
 (autoload 'reftex-default-bibliography "reftex-cite")
 (autoload 'reftex-bib-or-thebib "reftex-cite")
-(autoload 'reftex-create-bibtex-file "reftex-cite")
+(autoload 'reftex-create-bibtex-file "reftex-cite"
+  "Create a new BibTeX database BIBFILE with all entries referenced in document."
+  t)
 
 ;; Selection
 (autoload 'reftex-select-label-mode "reftex-sel")
@@ -219,17 +221,21 @@
 (defvar reftex-syntax-table nil)
 (defvar reftex-syntax-table-for-bib nil)
 
-(unless reftex-syntax-table
+(defun reftex--prepare-syntax-tables ()
   (setq reftex-syntax-table (copy-syntax-table))
   (modify-syntax-entry ?\( "." reftex-syntax-table)
-  (modify-syntax-entry ?\) "." reftex-syntax-table))
+  (modify-syntax-entry ?\) "." reftex-syntax-table)
 
-(unless reftex-syntax-table-for-bib
   (setq reftex-syntax-table-for-bib (copy-syntax-table))
   (modify-syntax-entry ?\' "." reftex-syntax-table-for-bib)
   (modify-syntax-entry ?\" "." reftex-syntax-table-for-bib)
   (modify-syntax-entry ?\[ "." reftex-syntax-table-for-bib)
-  (modify-syntax-entry ?\] "." reftex-syntax-table-for-bib))
+  (modify-syntax-entry ?\] "." reftex-syntax-table-for-bib)
+  (modify-syntax-entry ?\( "." reftex-syntax-table-for-bib)
+  (modify-syntax-entry ?\) "." reftex-syntax-table-for-bib))
+
+(unless (and reftex-syntax-table reftex-syntax-table-for-bib)
+  (reftex--prepare-syntax-tables))
 
 ;; The following definitions are out of place, but I need them here
 ;; to make the compilation of reftex-mode not complain.
@@ -293,15 +299,9 @@ on the menu bar.
           (put 'reftex-auto-recenter-toc 'initialized t))
 
         ;; Prepare the special syntax tables.
-        (setq reftex-syntax-table (copy-syntax-table (syntax-table)))
-        (modify-syntax-entry ?\( "." reftex-syntax-table)
-        (modify-syntax-entry ?\) "." reftex-syntax-table)
+	(reftex--prepare-syntax-tables)
 
-        (setq reftex-syntax-table-for-bib (copy-syntax-table))
-        (modify-syntax-entry ?\' "." reftex-syntax-table-for-bib)
-        (modify-syntax-entry ?\" "." reftex-syntax-table-for-bib)
-        (modify-syntax-entry ?\[ "." reftex-syntax-table-for-bib)
-        (modify-syntax-entry ?\] "." reftex-syntax-table-for-bib))
+        (run-hooks 'reftex-mode-hook))
     ;; Mode was turned off
     (easy-menu-remove reftex-mode-menu)))
 
@@ -545,7 +545,7 @@ will deactivate it."
 	     (when (member style list)
 	       (setq reftex-tables-dirty t
 		     changed t)
-	       (delete style list)))
+	       (setq list (delete style list))))
 	    (t
 	     (if (member style list)
 		 (delete style list)
@@ -663,6 +663,16 @@ will deactivate it."
 (defvar reftex-index-macro-alist nil)
 (defvar reftex-find-label-regexp-format nil)
 (defvar reftex-find-label-regexp-format2 nil)
+
+;; Constants for making RefTeX open to Texinfo hooking
+(defvar reftex-section-pre-regexp "\\\\")
+;; Including `\' as a character to be matched at the end of the regexp
+;; will allow stuff like \begin{foo}\label{bar} to be matched.  This
+;; will make the parser to advance one char too much.  Therefore
+;; `reftex-parse-from-file' will step one char back if a section is
+;; found.
+(defvar reftex-section-post-regexp "\\*?\\(\\[[^]]*\\]\\)?[[{ \t\r\n\\]")
+(defvar reftex-section-info-function 'reftex-section-info)
 
 (defvar reftex-memory nil
   "Memorizes old variable values to indicate changes in these variables.")
@@ -1069,13 +1079,7 @@ This enforces rescanning the buffer on next use."
            (wbol "\\(^\\)[ \t]*") ; Need to keep the empty group because
                                   ; match numbers are hard coded
            (label-re (concat "\\(?:"
-			     ;; Normal \label{...}
-			     "\\\\label{\\([^}]*\\)}"
-			     "\\|"
-			     ;; keyvals [..., label = {foo}, ...]
-			     ;; forms used by ctable, listings,
-			     ;; minted, ...
-			     "\\[[^]]*label[[:space:]]*=[[:space:]]*{?\\(?1:[^],}]+\\)}?"
+			     (mapconcat 'identity reftex-label-regexps "\\|")
 			     "\\)"))
            (include-re (concat wbol
                                "\\\\\\("
@@ -1083,16 +1087,10 @@ This enforces rescanning the buffer on next use."
                                           reftex-include-file-commands "\\|")
                                "\\)[{ \t]+\\([^} \t\n\r]+\\)"))
            (section-re
-	    ;; Including `\' as a character to be matched at the end
-	    ;; of the regexp will allow stuff like
-	    ;; \begin{foo}\label{bar} to be matched.  This will make
-	    ;; the parser to advance one char too much.  Therefore
-	    ;; `reftex-parse-from-file' will step one char back if a
-	    ;; section is found.
-            (concat wbol "\\\\\\("
+            (concat wbol reftex-section-pre-regexp "\\("
                     (mapconcat (lambda (x) (regexp-quote (car x)))
                                reftex-section-levels-all "\\|")
-                    "\\)\\*?\\(\\[[^]]*\\]\\)?[[{ \t\r\n\\]"))
+                    "\\)" reftex-section-post-regexp))
            (appendix-re (concat wbol "\\(\\\\appendix\\)"))
            (macro-re
             (if macros-with-labels
@@ -2256,6 +2254,8 @@ IGNORE-WORDS List of words which should be removed from the string."
     (define-key reftex-mode-map [(shift mouse-2)]
       'reftex-mouse-view-crossref)))
 
+(defvar bibtex-mode-map)
+
 ;; Bind `reftex-view-crossref-from-bibtex' in BibTeX mode map
 (eval-after-load
  "bibtex"
@@ -2458,7 +2458,7 @@ information about your RefTeX version and configuration."
   (require 'reporter)
   (let ((reporter-prompt-for-summary-p "Bug report subject: "))
     (reporter-submit-bug-report
-     "bug-auctex@gnu.org"
+     "bug-auctex@gnu.org, bug-gnu-emacs@gnu.org"
      reftex-version
      (list 'window-system
 	   'reftex-plug-into-AUCTeX)

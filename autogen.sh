@@ -1,9 +1,10 @@
 #!/bin/sh
-### autogen.sh - tool to help build Emacs from a bzr checkout
+### autogen.sh - tool to help build Emacs from a repository checkout
 
-## Copyright (C) 2011-2013 Free Software Foundation, Inc.
+## Copyright (C) 2011-2015 Free Software Foundation, Inc.
 
 ## Author: Glenn Morris <rgm@gnu.org>
+## Maintainer: emacs-devel@gnu.org
 
 ## This file is part of GNU Emacs.
 
@@ -22,10 +23,10 @@
 
 ### Commentary:
 
-## The Emacs bzr repository does not include the configure script
-## (and associated helpers).  The first time you fetch Emacs from bzr,
+## The Emacs repository does not include the configure script (and
+## associated helpers).  The first time you fetch Emacs from the repo,
 ## run this script to generate the necessary files.
-## For more details, see the file INSTALL.BZR.
+## For more details, see the file INSTALL.REPO.
 
 ### Code:
 
@@ -105,7 +106,7 @@ check_version ()
 
 cat <<EOF
 Checking whether you have the necessary tools...
-(Read INSTALL.BZR for more details on building Emacs)
+(Read INSTALL.REPO for more details on building Emacs)
 
 EOF
 
@@ -142,7 +143,7 @@ if [ x"$missing" != x ]; then
 
     cat <<EOF
 
-Building Emacs from Bzr requires the following specialized programs:
+Building Emacs from the repository requires the following specialized programs:
 EOF
 
     for prog in $progs; do
@@ -191,13 +192,6 @@ autoreconf -i -I m4
 
 instead of this script.
 
-If all else fails, you can try using the pre-built versions of the
-generated files by doing:
-
-./autogen/copy_autogen
-
-This is not recommended - see the comments in \`copy_autogen'.
-
 Please report any problems with this script to bug-gnu-emacs@gnu.org .
 EOF
 
@@ -213,6 +207,46 @@ autoreconf -i -I m4 || exit $?
 ## Create a timestamp, so that './autogen.sh; make' doesn't
 ## cause 'make' to needlessly run 'autoheader'.
 echo timestamp > src/stamp-h.in || exit
+
+## Install Git hooks, if using Git.
+if test -d .git/hooks; then
+    tailored_hooks=
+    sample_hooks=
+
+    for hook in commit-msg pre-commit; do
+	cmp build-aux/git-hooks/$hook .git/hooks/$hook >/dev/null 2>&1 ||
+	tailored_hooks="$tailored_hooks $hook"
+    done
+    for hook in applypatch-msg pre-applypatch; do
+	cmp .git/hooks/$hook.sample .git/hooks/$hook >/dev/null 2>&1 ||
+	sample_hooks="$sample_hooks $hook"
+    done
+
+    if test -n "$tailored_hooks$sample_hooks"; then
+	echo "Installing git hooks..."
+
+	case `cp --help 2>/dev/null` in
+	  *--backup*--verbose*)
+	    cp_options='--backup=numbered --verbose';;
+	  *)
+	    cp_options='-f';;
+	esac
+
+	if test -n "$tailored_hooks"; then
+	    for hook in $tailored_hooks; do
+		cp $cp_options build-aux/git-hooks/$hook .git/hooks || exit
+		chmod a-w .git/hooks/$hook || exit
+	    done
+	fi
+
+	if test -n "$sample_hooks"; then
+	    for hook in $sample_hooks; do
+		cp $cp_options .git/hooks/$hook.sample .git/hooks/$hook || exit
+		chmod a-w .git/hooks/$hook || exit
+	    done
+	fi
+    fi
+fi
 
 echo "You can now run \`./configure'."
 

@@ -1,6 +1,6 @@
 @c -*-texinfo-*-
 @c This is part of the GNU Emacs Lisp Reference Manual.
-@c Copyright (C) 1990-1995, 1998-1999, 2001-2013 Free Software
+@c Copyright (C) 1990-1995, 1998-1999, 2001-2015 Free Software
 @c Foundation, Inc.
 @c See the file elisp.texi for copying conditions.
 @node Lists
@@ -84,6 +84,8 @@ structure made out of cons cells as a @dfn{list structure}.
 
 @node List-related Predicates
 @section Predicates on Lists
+@cindex predicates for lists
+@cindex list predicates
 
   The following predicates test whether a Lisp object is an atom,
 whether it is a cons cell or is a list, or whether it is the
@@ -270,8 +272,10 @@ are numbered starting with zero, so the @sc{car} of @var{list} is
 element number zero.  If the length of @var{list} is @var{n} or less,
 the value is @code{nil}.
 
-If @var{n} is negative, @code{nth} returns the first element of
-@var{list}.
+@c Behavior for -ve n undefined since 2013/08; see bug#15059.
+@ignore
+If @var{n} is negative, @code{nth} returns the first element of @var{list}.
+@end ignore
 
 @example
 @group
@@ -281,10 +285,6 @@ If @var{n} is negative, @code{nth} returns the first element of
 @group
 (nth 10 '(1 2 3 4))
      @result{} nil
-@end group
-@group
-(nth -3 '(1 2 3 4))
-     @result{} 1
 
 (nth n x) @equiv{} (car (nthcdr n x))
 @end group
@@ -300,7 +300,8 @@ This function returns the @var{n}th @sc{cdr} of @var{list}.  In other
 words, it skips past the first @var{n} links of @var{list} and returns
 what follows.
 
-If @var{n} is zero or negative, @code{nthcdr} returns all of
+@c "or negative" removed 2013/08; see bug#15059.
+If @var{n} is zero, @code{nthcdr} returns all of
 @var{list}.  If the length of @var{list} is @var{n} or less,
 @code{nthcdr} returns @code{nil}.
 
@@ -314,7 +315,7 @@ If @var{n} is zero or negative, @code{nthcdr} returns all of
      @result{} nil
 @end group
 @group
-(nthcdr -3 '(1 2 3 4))
+(nthcdr 0 '(1 2 3 4))
      @result{} (1 2 3 4)
 @end group
 @end example
@@ -647,8 +648,8 @@ If @var{separation} is 0 and @var{to} is neither @code{nil} nor
 numerically equal to @var{from}, @code{number-sequence} signals an
 error, since those arguments specify an infinite sequence.
 
-All arguments can be integers or floating point numbers.  However,
-floating point arguments can be tricky, because floating point
+All arguments are numbers.
+Floating-point arguments can be tricky, because floating-point
 arithmetic is inexact.  For instance, depending on the machine, it may
 quite well happen that @code{(number-sequence 0.4 0.6 0.2)} returns
 the one element list @code{(0.4)}, whereas
@@ -682,6 +683,8 @@ Some examples:
 
 @node List Variables
 @section Modifying List Variables
+@cindex modify a list
+@cindex list modification
 
   These functions, and one macro, provide convenient ways
 to modify a list which is stored in a variable.
@@ -838,6 +841,8 @@ new @sc{car} or @sc{cdr}.
 
 @node Setcar
 @subsection Altering List Elements with @code{setcar}
+@cindex replace list element
+@cindex list, replace element
 
   Changing the @sc{car} of a cons cell is done with @code{setcar}.  When
 used on a list, @code{setcar} replaces one element of a list with a
@@ -943,6 +948,7 @@ x2:              |
 
 @node Setcdr
 @subsection Altering the CDR of a List
+@cindex replace part of list
 
   The lowest-level primitive for modifying a @sc{cdr} is @code{setcdr}:
 
@@ -1045,6 +1051,7 @@ x1
 @node Rearrangement
 @subsection Functions that Rearrange Lists
 @cindex rearrangement of lists
+@cindex reordering, of elements in lists
 @cindex modification of lists
 
   Here are some functions that rearrange lists ``destructively'' by
@@ -1405,7 +1412,7 @@ sample-list
 @defun memql object list
 The function @code{memql} tests to see whether @var{object} is a member
 of @var{list}, comparing members with @var{object} using @code{eql},
-so floating point elements are compared by value.
+so floating-point elements are compared by value.
 If @var{object} is a member, @code{memql} returns a list starting with
 its first occurrence in @var{list}.  Otherwise, it returns @code{nil}.
 
@@ -1898,6 +1905,8 @@ and later discarded; this is not possible with a property list.
 
 @node Plist Access
 @subsection Property Lists Outside Symbols
+@cindex plist access
+@cindex accessing plist properties
 
   The following functions can be used to manipulate property lists.
 They all compare property names using @code{eq}.

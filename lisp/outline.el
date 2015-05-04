@@ -1,9 +1,9 @@
 ;;; outline.el --- outline mode commands for Emacs
 
-;; Copyright (C) 1986, 1993-1995, 1997, 2000-2013 Free Software
+;; Copyright (C) 1986, 1993-1995, 1997, 2000-2015 Free Software
 ;; Foundation, Inc.
 
-;; Maintainer: FSF
+;; Maintainer: emacs-devel@gnu.org
 ;; Keywords: outlines
 
 ;; This file is part of GNU Emacs.
@@ -43,25 +43,21 @@
   :prefix "outline-"
   :group 'wp)
 
-(defcustom outline-regexp "[*\^L]+"
+(defvar outline-regexp "[*\^L]+"
   "Regular expression to match the beginning of a heading.
 Any line whose beginning matches this regexp is considered to start a heading.
 Note that Outline mode only checks this regexp at the start of a line,
 so the regexp need not (and usually does not) start with `^'.
 The recommended way to set this is with a Local Variables: list
-in the file it applies to.  See also `outline-heading-end-regexp'."
-  :type 'regexp
-  :group 'outlines)
+in the file it applies to.  See also `outline-heading-end-regexp'.")
 ;;;###autoload(put 'outline-regexp 'safe-local-variable 'stringp)
 
-(defcustom outline-heading-end-regexp "\n"
+(defvar outline-heading-end-regexp "\n"
   "Regular expression to match the end of a heading line.
 You can assume that point is at the beginning of a heading when this
 regexp is searched for.  The heading ends at the end of the match.
 The recommended way to set this is with a `Local Variables:' list
-in the file it applies to."
-  :type 'regexp
-  :group 'outlines)
+in the file it applies to.")
 ;;;###autoload(put 'outline-heading-end-regexp 'safe-local-variable 'stringp)
 
 (defvar outline-mode-prefix-map
@@ -653,27 +649,32 @@ the match data is set appropriately."
 		   'outline-get-last-sibling))
 	(ins-point (make-marker))
 	(cnt (abs arg))
+	;; Make sure we can move forward to find the end of the
+	;; subtree and the insertion point.
+	(maybe-forward-char (lambda ()
+			      (if (eq (char-after) ?\n) (forward-char 1)
+				(if (and (eobp) (not (bolp))) (insert "\n")))))
 	beg end folded)
-    ;; Select the tree
+    ;; Select the tree.
     (outline-back-to-heading)
     (setq beg (point))
     (save-match-data
       (save-excursion (outline-end-of-heading)
 		      (setq folded (outline-invisible-p)))
       (outline-end-of-subtree))
-    (if (= (char-after) ?\n) (forward-char 1))
+    (funcall maybe-forward-char)
     (setq end (point))
-    ;; Find insertion point, with error handling
+    ;; Find insertion point, with error handling.
     (goto-char beg)
     (while (> cnt 0)
       (or (funcall movfunc)
 	  (progn (goto-char beg)
-		 (error "Cannot move past superior level")))
+		 (user-error "Cannot move past superior level")))
       (setq cnt (1- cnt)))
     (if (> arg 0)
-	;; Moving forward - still need to move over subtree
+	;; Moving forward - still need to move over subtree.
 	(progn (outline-end-of-subtree)
-	       (if (= (char-after) ?\n) (forward-char 1))))
+	       (funcall maybe-forward-char)))
     (move-marker ins-point (point))
     (insert (delete-and-extract-region beg end))
     (goto-char ins-point)

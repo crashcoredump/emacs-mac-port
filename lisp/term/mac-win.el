@@ -1,7 +1,7 @@
 ;;; mac-win.el --- parse switches controlling interface with Mac window system -*-coding: utf-8-*-
 
 ;; Copyright (C) 1999-2008  Free Software Foundation, Inc.
-;; Copyright (C) 2009-2014  YAMAMOTO Mitsuharu
+;; Copyright (C) 2009-2015  YAMAMOTO Mitsuharu
 
 ;; Author: Andrew Choi <akochoi@mac.com>
 ;;	YAMAMOTO Mitsuharu <mituharu@math.s.chiba-u.ac.jp>
@@ -130,6 +130,18 @@
 (defconst x-pointer-top-side mac-pointer-resize-up)
 (defconst x-pointer-bottom-side mac-pointer-resize-down)
 (defconst x-pointer-sb-v-double-arrow mac-pointer-resize-up-down)
+
+
+;;;; Utility functions
+(defun mac-possibly-use-high-resolution-monitors-p ()
+  "Return non-nil if high-resolution monitors can possibly be used.
+Namely, either a Retina display is connected or HiDPI display
+modes have been enabled with Quartz Debug.app."
+  (or
+   ;; HiDPI display modes have been enabled with Quartz Debug.app.
+   (mac-get-preference "DisplayResolutionEnabled" "com.apple.windowserver")
+   (cl-loop for attributes in (display-monitor-attributes-list)
+	    if (eq (cdr (assq 'backing-scale-factor attributes)) 2) return t)))
 
 
 ;;;; Modifier keys
@@ -298,20 +310,6 @@
 	(or (cdr (assq mac-system-script-code mac-script-code-coding-systems))
 	    'mac-roman))
   (set-selection-coding-system mac-system-coding-system))
-
-
-;;;; Keyboard layout/language change events
-(defun mac-handle-language-change (event)
-  "Set keyboard coding system to what is specified in EVENT."
-  (interactive "e")
-  (let ((coding-system
-	 (cdr (assq (car (cadr event)) mac-script-code-coding-systems))))
-    (set-keyboard-coding-system (or coding-system 'mac-roman))
-    ;; MacJapanese maps reverse solidus to ?\x80.
-    (if (eq coding-system 'japanese-shift-jis)
-	(define-key key-translation-map [?\x80] "\\"))))
-
-(define-key special-event-map [language-change] 'mac-handle-language-change)
 
 
 ;;;; Composition
@@ -1085,18 +1083,34 @@ through this without \"emulated closures\".  For example,
 
 ;; url-generic-parse-url is autoloaded from url-parse.
 (declare-function url-type "url-parse" t t) ; defstruct
+(declare-function org-protocol-check-filename-for-protocol "org-protocol.el"
+		  (fname restoffiles client))
 
 (defun mac-ae-get-url (event)
   "Open the URL specified by the Apple event EVENT.
-Currently the `mailto' scheme is supported."
+Currently the `mailto' and `org-protocol' schemes are supported."
   (interactive "e")
   (let* ((ae (mac-event-ae event))
-	 (parsed-url (url-generic-parse-url (mac-ae-text ae))))
-    (if (string= (url-type parsed-url) "mailto")
-	(progn
-	  (url-mailto parsed-url)
-	  (select-frame-set-input-focus (selected-frame)))
-      (mac-resume-apple-event ae t))))
+	 (url (mac-ae-text ae)))
+    (cond ((string-match "\\`mailto:" url)
+	   (url-mailto (url-generic-parse-url url))
+	   (select-frame-set-input-focus (selected-frame)))
+	  ((string-match "\\`org-protocol:" url)
+	   (require 'org-protocol)
+	   ;; URL of the form `org-protocol://sub-protocol:/...' might
+	   ;; have been standardized to
+	   ;; `org-protocol://sub-protocol/...' .
+	   (if (and (string-match "\\`org-protocol:/+[^/]+/" url)
+		    (not (eq (aref url (- (match-end 0) 2)) ?:)))
+	       (setq url (concat (substring url 0 (1- (match-end 0)))
+				 ":" (substring url (1- (match-end 0))))))
+	   (condition-case err
+	       (org-protocol-check-filename-for-protocol url (list url) nil)
+	     (error
+	      (message "%s" (error-message-string err))))
+	   (select-frame-set-input-focus (selected-frame)))
+	  (t
+	   (mac-resume-apple-event ae t)))))
 
 (setq mac-apple-event-map (make-sparse-keymap))
 
@@ -1200,6 +1214,60 @@ Currently the `mailto' scheme is supported."
       (if mac-odb-received-apple-events
 	  (mac-odb-send-closed-file-events)))))
 
+;;; AppleScript
+(declare-function mac-osa-script "mac.c"
+		  (code-or-file &optional compiled-p-or-language file-p
+				value-form handler-call &rest args))
+
+(defvar mac-do-applescript-use-legacy-encoding nil
+  "Non-nil means `mac-do-applescript' uses legacy encoding for unibyte scripts.
+If this value is nil or the script given to `mac-do-applescript'
+is a multibyte string, it is regarded as a Unicode text.
+Otherwise, the script is regarded as a byte sequence in a Mac
+traditional encoding specified by `mac-system-script-code', just
+as in the Carbon(+AppKit) ports of Emacs 22 or the Mac port of
+Emacs 23-24.  In the latter case, the return value or the error
+message of `mac-do-applescript' is also a unibyte string in the
+Mac traditional encoding.
+
+Note that if this value is non-nil, a unibyte ASCII-only script
+does not always have the same meaning as the multibyte
+counterpart.  For example, `\\x5c' in a unibyte script is
+interpreted as a yen sign when the value of
+`mac-system-script-code' is 1 (smJapanese), but the same
+character in a multibyte script is interpreted as a reverse
+solidus.  You may want to apply `string-to-multibyte' to the
+script if it is given as an ASCII-only string literal.")
+
+(defun mac-do-applescript (script)
+  "Compile and execute AppleScript SCRIPT and return the result.
+If compilation and execution are successful, the resulting script
+value is returned as a string.  Otherwise the function aborts and
+displays the error message returned by the AppleScript scripting
+component.
+
+Set `mac-do-applescript-use-legacy-encoding' to t if you want
+strict compatibility with the Carbon(+AppKit) ports of Emacs 22
+or the Mac port of Emacs 23-24 about encoding of SCRIPT."
+  (let ((use-legacy-encoding (and mac-do-applescript-use-legacy-encoding
+				  (not (multibyte-string-p script)))))
+    (condition-case err
+	(if (not use-legacy-encoding)
+	    (mac-osa-script script)
+	  (setq script (decode-coding-string
+			(mac-coerce-ae-data "TEXT" script "utf8") 'utf-8))
+	  (mac-coerce-ae-data "utf8" (encode-coding-string
+				      (mac-osa-script script) 'utf-8) "TEXT"))
+      (error
+       (if (equal (cadr err) "OSA script error")
+	   (error "AppleScript error %d" (cdr (assq 'number (cddr err))))
+	 (error "%s" (if use-legacy-encoding
+			 (mac-coerce-ae-data "utf8" (encode-coding-string
+						     (cadr err) 'utf-8) "TEXT")
+		       (cadr err))))))))
+
+(defalias 'do-applescript 'mac-do-applescript)
+
 ;;; Font panel
 (declare-function mac-set-font-panel-visible-p "macfns.c" (flag))
 
@@ -1240,8 +1308,14 @@ the mode if ARG is omitted or nil."
   'showhide-speedbar)
 
 ;;; Text Services
+(declare-function mac-select-input-source "macfns.c"
+		  (source &optional set-keyboard-layout-override-p))
+
 (setq mac-ts-active-input-overlay (make-overlay 1 1))
 (overlay-put mac-ts-active-input-overlay 'display "")
+
+(defvar mac-ts-active-input-string ""
+  "String of text in Mac TSM active input area.")
 
 (defface mac-ts-caret-position
   '((t :inverse-video t))
@@ -1385,7 +1459,8 @@ the echo area or in a buffer where the cursor is not displayed."
 		(delete-region (+ (point-min) (car replacement-range))
 			       (+ (point-min) (car replacement-range)
 				  (cdr replacement-range)))
-	      (error nil)))))))
+	      (error nil))))
+      (setq mac-ts-active-input-string active-input-string))))
 
 (defvar mac-emoji-font-regexp "\\<emoji\\>"
   "Regexp matching font names for emoji.
@@ -1436,6 +1511,7 @@ sensitive to the variation selector.")
 				      '(mac-ts-active-input-string nil)
 				      msg)
 	      (message "%s" msg))))))
+    (setq mac-ts-active-input-string "")
     (if replacement-range
 	(condition-case nil
 	    ;; Strictly speaking, the replacement range can be out of
@@ -1453,10 +1529,101 @@ sensitive to the variation selector.")
 	  (setq string (mac-complement-emoji-by-variation-selector string)))
       (mac-unread-string string))))
 
+(defcustom mac-selected-keyboard-input-source-change-hook nil
+  "Hook run for a change to the selected keyboard input source.
+The hook functions are not called when Emacs is in the background
+even if the selected keyboard input source is changed outside
+Emacs.
+This hook is not used on Mac OS X 10.4."
+  :package-version '(Mac\ port . "5.2")
+  :type 'hook
+  :group 'mac)
+
+(defcustom mac-enabled-keyboard-input-sources-change-hook nil
+  "Hook run for a change to the set of enabled keyboard input sources.
+This hook is not used on Mac OS X 10.4."
+  :package-version '(Mac\ port . "5.2")
+  :type 'hook
+  :group 'mac)
+
+(defun mac-text-input-handle-notification (event)
+  (interactive "e")
+  (let ((ae (mac-event-ae event)))
+    (let ((name (cdr (mac-ae-parameter ae 'name))))
+      (cond ((string= name (concat "com.apple.Carbon.TISNotify"
+				   "SelectedKeyboardInputSourceChanged"))
+	     (run-hooks 'mac-selected-keyboard-input-source-change-hook))
+	    ((string= name (concat "com.apple.Carbon.TISNotify"
+				   "EnabledKeyboardInputSourcesChanged"))
+	     (run-hooks 'mac-enabled-keyboard-input-sources-change-hook))))))
+
 (define-key mac-apple-event-map [text-input set-marked-text]
   'mac-text-input-set-marked-text)
 (define-key mac-apple-event-map [text-input insert-text]
   'mac-text-input-insert-text)
+(define-key mac-apple-event-map [text-input notification]
+  'mac-text-input-handle-notification)
+
+(defun mac-auto-ascii-select-input-source ()
+  "Select the most-recently-used ASCII-capable keyboard input source.
+Expects to be added to normal hooks."
+  (if (= (length mac-ts-active-input-string) 0)
+      (mac-select-input-source 'ascii-capable-keyboard)))
+
+(defun mac-auto-ascii-setup-input-source (&optional _prompt)
+  "Set up the most-recently-used ASCII-capable keyboard input source.
+Expects to be bound to global keymap's prefix keys in
+`input-decode-map'."
+  (mac-auto-ascii-select-input-source)
+  (vector last-input-event))
+
+(define-minor-mode mac-auto-ascii-mode
+  "Toggle Mac Auto ASCII mode.
+With a prefix argument ARG, enable Mac Auto ASCII mode if ARG is
+positive, and disable it otherwise.  If called from Lisp, enable
+the mode if ARG is omitted or nil.
+
+Mac Auto ASCII mode automatically selects the most-recently-used
+ASCII-capable keyboard input source on some occasions: after
+prefix key (bound in the global keymap) press such as C-x and
+M-g, and at the start of minibuffer input.  This mode has no
+effect on Mac OS X 10.4.
+
+Strictly speaking, its implementation has a timing issue: the
+Lisp event queue may already have some input events that have
+been processed by some previous keyboard input source but yet to
+be processed by the Lisp interpreter."
+  :init-value nil
+  :global t
+  :group 'mac
+  :package-version '(Mac\ port . "5.2")
+  (if mac-auto-ascii-mode
+      (when (eq (terminal-live-p (frame-terminal)) 'mac)
+	(map-keymap (lambda (event definition)
+		      (if (and (keymapp definition) (integerp event)
+			       (not (eq event ?\e)))
+			  (define-key input-decode-map (vector event)
+			    'mac-auto-ascii-setup-input-source)))
+		    global-map)
+	(map-keymap (lambda (event definition)
+		      (if (and (keymapp definition) (integerp event)
+			       (not (eq event ?\e)))
+			  (define-key input-decode-map (vector ?\e event)
+			    'mac-auto-ascii-setup-input-source)))
+		    esc-map)
+	(add-hook 'minibuffer-setup-hook 'mac-auto-ascii-select-input-source))
+    (map-keymap (lambda (event definition)
+		  (if (eq definition 'mac-auto-ascii-setup-input-source)
+		      (define-key input-decode-map (vector event) nil)))
+		input-decode-map)
+    (let ((input-decode-esc-map (lookup-key input-decode-map "\e")))
+      (if (keymapp input-decode-esc-map)
+	  (map-keymap
+	   (lambda (event definition)
+	     (if (eq definition 'mac-auto-ascii-setup-input-source)
+		 (define-key input-decode-map (vector ?\e event) nil)))
+	   input-decode-esc-map)))
+    (remove-hook 'minibuffer-setup-hook 'mac-auto-ascii-select-input-source)))
 
 ;;; Converted Actions
 (defun mac-handle-about (event)
@@ -1916,7 +2083,8 @@ non-nil, and the input device supports it."
 	     ;; Do redisplay and measure line heights before selecting
 	     ;; the window to scroll.
 	     (point-height
-	      (or (progn
+	      (or (window-line-height nil window-to-scroll)
+		  (progn
 		    (redisplay t)
 		    (window-line-height nil window-to-scroll))
 		  ;; The above still sometimes return nil.
@@ -1968,9 +2136,8 @@ non-nil, and the input device supports it."
 			    delta-y)
 			(or
 			 ;; Cursor is still fully visible if scrolled?
-			 (<= (- (nth 2 point-height) delta-y)
-			     (- (+ first-y window-inside-pixel-height)
-				(frame-char-height)))
+			 (<= (+ (car point-height) (nth 2 point-height))
+			     (+ first-y window-inside-pixel-height delta-y))
 			 ;; Window has the only one row?
 			 (= (nth 2 first-height) (nth 2 last-height)))))
 		      ((> delta-y 0) ; scroll up
@@ -2008,6 +2175,8 @@ non-nil, and the input device supports it."
 		       (funcall mwheel-scroll-up-function 1)
 		     (end-of-buffer))
 		   (setq delta-y 0)))
+		;; XXX: Why is this necessary?
+		(set-window-start nil (window-start))
 		(set-window-vscroll nil 0 t))
 	      (condition-case nil
 		  (if (< delta-y 0)
@@ -2076,13 +2245,16 @@ non-nil, and the input device supports it."
 						 0 prev-first-vscrolled-y))))))
 			      (set-window-vscroll nil 0 t))))
 			(let* ((target-posn (posn-at-x-y 0 (+ first-y delta-y)))
-			       (target-coord (pos-visible-in-window-p
-					      (posn-point target-posn) nil t))
-			       (target-row (cdr (posn-actual-col-row
-						 target-posn)))
+			       target-coord target-row
 			       target-y scrolled-pixel-height)
-			  (if (and target-coord target-row)
-			      (setq target-y (cadr target-coord))
+			  (if (and (eq (posn-window target-posn)
+				       (selected-window))
+				   (null (posn-area target-posn)))
+			      (progn
+				(setq target-coord
+				      (pos-visible-in-window-p
+				       (posn-point target-posn) nil t))
+				(setq target-y (cadr target-coord)))
 			    ;; The target row is below the visible
 			    ;; area.  Temporarily set vscroll so the
 			    ;; target row comes at the top and
@@ -2092,12 +2264,23 @@ non-nil, and the input device supports it."
 			    (setq target-coord (pos-visible-in-window-p
 						(posn-point target-posn) nil t))
 			    (set-window-vscroll nil 0 t)
-			    (setq target-row (cdr (posn-actual-col-row
-						   target-posn)))
 			    (setq target-y (cadr target-coord))
-			    (if (= target-y 0)
-				(setq target-y (- (or (nth 2 target-coord)) 0)))
+			    (cond ((null target-y)
+			    	   ;; Image is completely invisible
+			    	   ;; but its descent is visible in
+			    	   ;; the first row.
+			    	   (setq target-y
+			    		 (- first-y (cdr (posn-object-x-y
+			    				  target-posn)))))
+			    	  ((= target-y first-y)
+			    	   ;; Image is partly invisible in the
+			    	   ;; first row.
+			    	   (setq target-y
+			    		 (- first-y (or (nth 2 target-coord)
+			    				0)))))
 			    (setq target-y (+ target-y delta-y)))
+			  (setq target-row
+				(cdr (posn-actual-col-row target-posn)))
 			  (setq scrolled-pixel-height (- target-y first-y))
 			  ;; Cancel the last scroll.
 			  (goto-char prev-point)
@@ -2173,8 +2356,12 @@ non-nil, and the input device supports it."
 			  ;; Emacs 23 -> 24 incompatibility: the
 			  ;; actual row part of POSITION now counts
 			  ;; the header line.
-			  (if header-line-height
-			      (setq target-row (1- target-row)))
+			  ;;
+			  ;; Emacs 24.3 -> 24.4 incompatibility again:
+			  ;; the actual row part of POSITION no longer
+			  ;; counts the header line (see Bug#18384).
+			  ;; (if header-line-height
+			  ;;     (setq target-row (1- target-row)))
 			  (scroll-up (if (= delta-y scrolled-pixel-height)
 					 target-row
 				       (1+ target-row)))
@@ -2398,6 +2585,8 @@ The actual magnification is performed by `text-scale-mode'."
 ;;; Window system initialization.
 
 (defun x-win-suspend-error ()
+  "Report an error when a suspend is attempted.
+This returns an error if any Emacs frames are X frames, or always under W32 or Mac."
   (error "Suspending an Emacs running under Mac makes no sense"))
 
 (defvar mac-initialized nil
@@ -2459,7 +2648,7 @@ standard ones in `x-handle-args'."
   (mac-start-animation (selected-window) :type 'fade-out)
   (exit-splash-screen))
 
-(defun mac-initialize-window-system ()
+(defun mac-initialize-window-system (&optional _display)
   "Initialize Emacs for Mac GUI frames."
   (cl-assert (not mac-initialized))
 

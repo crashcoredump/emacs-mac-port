@@ -1,6 +1,6 @@
 /* Unix emulation routines for GNU Emacs on the Mac OS.
    Copyright (C) 2000-2008  Free Software Foundation, Inc.
-   Copyright (C) 2009-2014  YAMAMOTO Mitsuharu
+   Copyright (C) 2009-2015  YAMAMOTO Mitsuharu
 
 This file is part of GNU Emacs Mac port.
 
@@ -54,11 +54,6 @@ along with GNU Emacs Mac port.  If not, see <http://www.gnu.org/licenses/>.  */
 #if !SELECT_USE_GCD
 #include <pthread.h>
 #endif
-
-/* An instance of the AppleScript component.  */
-static ComponentInstance as_scripting_component;
-/* The single script context used for all script executions.  */
-static OSAID as_script_context;
 
 
 /***********************************************************************
@@ -190,7 +185,7 @@ mac_aelist_to_lisp (const AEDescList *desc_list)
   Size size;
   AEKeyword keyword;
   AEDesc desc;
-  int attribute_p = 0;
+  bool attribute_p = false;
 
   err = AECountItems (desc_list, &count);
   if (err != noErr)
@@ -266,7 +261,7 @@ mac_aelist_to_lisp (const AEDescList *desc_list)
 
   if (desc_list->descriptorType == typeAppleEvent && !attribute_p)
     {
-      attribute_p = 1;
+      attribute_p = true;
       count = sizeof (ae_attr_table) / sizeof (ae_attr_table[0]);
       goto again;
     }
@@ -1119,11 +1114,11 @@ cfobject_to_lisp (CFTypeRef obj, int flags, int hash_bound)
 	}
       else
 	{
-	  result = make_hash_table (Qequal,
+	  result = make_hash_table (hashtest_equal,
 				    make_number (count),
 				    make_float (DEFAULT_REHASH_SIZE),
 				    make_float (DEFAULT_REHASH_THRESHOLD),
-				    Qnil, Qnil, Qnil);
+				    Qnil);
 	  CFDictionaryApplyFunction (obj, cfdictionary_puthash,
 				     &context);
 	}
@@ -1501,6 +1496,47 @@ cfproperty_list_create_with_string (Lisp_Object string)
   return result;
 }
 
+/* Create CFPropertyList from the contents of the file specified by
+   URL.  Return NULL if the creation failed.  */
+
+static CFPropertyListRef
+cfproperty_list_create_with_url (CFURLRef url)
+{
+  CFPropertyListRef result = NULL;
+  CFReadStreamRef stream = CFReadStreamCreateWithFile (NULL, url);
+
+  if (stream)
+    {
+      if (CFReadStreamOpen (stream))
+	{
+#if MAC_OS_X_VERSION_MIN_REQUIRED >= 1060
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060
+	  if (CFPropertyListCreateWithStream != NULL)
+#endif
+	    {
+	      result = CFPropertyListCreateWithStream (NULL, stream, 0,
+						       kCFPropertyListImmutable,
+						       NULL, NULL);
+	    }
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060
+	  else		  /* CFPropertyListCreateWithStream == NULL */
+#endif
+#endif	/* MAC_OS_X_VERSION_MAX_ALLOWED >= 1060 */
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060
+	    {
+	      result = CFPropertyListCreateFromStream (NULL, stream, 0,
+						       kCFPropertyListImmutable,
+						       NULL, NULL);
+	    }
+#endif
+	  CFReadStreamClose (stream);
+	}
+      CFRelease (stream);
+    }
+
+  return result;
+}
+
 
 /***********************************************************************
 		 Emulation of the X Resource Manager
@@ -1531,7 +1567,7 @@ skip_white_space (const char **p)
     P++;
 }
 
-static int
+static bool
 parse_comment (const char **p)
 {
   /* Comment = "!" {<any character except null or newline>} */
@@ -1541,14 +1577,14 @@ parse_comment (const char **p)
       while (*P)
 	if (*P++ == '\n')
 	  break;
-      return 1;
+      return true;
     }
   else
-    return 0;
+    return false;
 }
 
 /* Don't interpret filename.  Just skip until the newline.  */
-static int
+static bool
 parse_include_file (const char **p)
 {
   /* IncludeFile = "#" WhiteSpace "include" WhiteSpace FileName WhiteSpace */
@@ -1558,10 +1594,10 @@ parse_include_file (const char **p)
       while (*P)
 	if (*P++ == '\n')
 	  break;
-      return 1;
+      return true;
     }
   else
-    return 0;
+    return false;
 }
 
 static char
@@ -1643,7 +1679,7 @@ parse_value (const char **p)
 {
   char *q, *buf;
   Lisp_Object seq = Qnil, result;
-  int buf_len, total_len = 0, len, continue_p;
+  int buf_len, total_len = 0, len;
 
   q = strchr (P, '\n');
   buf_len = q ? q - P : strlen (P);
@@ -1651,8 +1687,9 @@ parse_value (const char **p)
 
   while (1)
     {
+      bool continue_p = false;
+
       q = buf;
-      continue_p = 0;
       while (*P)
 	{
 	  if (*P == '\n')
@@ -1668,7 +1705,7 @@ parse_value (const char **p)
 	      else if (*P == '\n')
 		{
 		  P++;
-		  continue_p = 1;
+		  continue_p = true;
 		  break;
 		}
 	      else if (*P == 'n')
@@ -1781,10 +1818,9 @@ xrm_create_database (void)
 {
   XrmDatabase database;
 
-  database = make_hash_table (Qequal, make_number (DEFAULT_HASH_SIZE),
+  database = make_hash_table (hashtest_equal, make_number (DEFAULT_HASH_SIZE),
 			      make_float (DEFAULT_REHASH_SIZE),
-			      make_float (DEFAULT_REHASH_THRESHOLD),
-			      Qnil, Qnil, Qnil);
+			      make_float (DEFAULT_REHASH_THRESHOLD), Qnil);
   Fputhash (HASHKEY_MAX_NID, make_number (0), database);
   Fputhash (HASHKEY_QUERY_CACHE, Qnil, database);
 
@@ -1916,10 +1952,11 @@ xrm_get_resource (XrmDatabase database, const char *name, const char *class)
   query_cache = Fgethash (HASHKEY_QUERY_CACHE, database, Qnil);
   if (NILP (query_cache))
     {
-      query_cache = make_hash_table (Qequal, make_number (DEFAULT_HASH_SIZE),
+      query_cache = make_hash_table (hashtest_equal,
+				     make_number (DEFAULT_HASH_SIZE),
 				     make_float (DEFAULT_REHASH_SIZE),
 				     make_float (DEFAULT_REHASH_THRESHOLD),
-				     Qnil, Qnil, Qnil);
+				     Qnil);
       Fputhash (HASHKEY_QUERY_CACHE, query_cache, database);
     }
   h = XHASH_TABLE (query_cache);
@@ -2066,35 +2103,6 @@ xrm_get_preference_database (const char *application)
 
 
 Lisp_Object Qmac_file_alias_p;
-
-void
-initialize_applescript (void)
-{
-  AEDesc null_desc;
-  OSAError osaerror;
-
-  /* if open fails, as_scripting_component is set to NULL.  Its
-     subsequent use in OSA calls will fail with badComponentInstance
-     error.  */
-  as_scripting_component = OpenDefaultComponent (kOSAComponentType,
-						 kAppleScriptSubtype);
-
-  null_desc.descriptorType = typeNull;
-  null_desc.dataHandle = 0;
-  osaerror = OSAMakeContext (as_scripting_component, &null_desc,
-			     kOSANullScript, &as_script_context);
-  if (osaerror)
-    as_script_context = kOSANullScript;
-      /* use default context if create fails */
-}
-
-
-void
-terminate_applescript (void)
-{
-  OSADispose (as_scripting_component, as_script_context);
-  CloseComponent (as_scripting_component);
-}
 
 /* Convert a lisp string to the 4 byte character code.  */
 
@@ -2252,11 +2260,15 @@ DEFUN ("system-move-file-to-trash", Fsystem_move_file_to_trash,
        doc: /* Move file or directory named FILENAME to the recycle bin.  */)
   (Lisp_Object filename)
 {
-  OSStatus err;
+  enum {NO_ERROR, POSIX_ERROR, OSSTATUS_ERROR, COCOA_ERROR, OTHER_ERROR} domain;
+  CFIndex code;
   Lisp_Object errstring = Qnil;
   Lisp_Object handler;
   Lisp_Object encoded_file;
   Lisp_Object operation;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 1050
+  bool use_finder_p;
+#endif
 
   operation = Qdelete_file;
   if (!NILP (Ffile_directory_p (filename))
@@ -2274,29 +2286,46 @@ DEFUN ("system-move-file-to-trash", Fsystem_move_file_to_trash,
   encoded_file = ENCODE_FILE (filename);
 
   block_input ();
+  domain = NO_ERROR;
 #if MAC_OS_X_VERSION_MAX_ALLOWED >= 1050
-  if (!mac_system_move_file_to_trash_use_finder
-#if MAC_OS_X_VERSION_MIN_REQUIRED < 1050 && MAC_OS_X_VERSION_MIN_REQUIRED >= 1020
-      && FSMoveObjectToTrashSync != NULL
-#endif
-      )
+  use_finder_p = mac_system_move_file_to_trash_use_finder;
+  if (!use_finder_p)
     {
-      FSRef fref;
+      CFErrorRef error;
 
-      err = FSPathMakeRefWithOptions (SDATA (encoded_file),
-				      kFSPathMakeRefDoNotFollowLeafSymlink,
-				      &fref, NULL);
-      if (err == noErr)
-	/* FSPathMoveObjectToTrashSync tries to delete the destination
-	   of the specified symbolic link.  So we use
-	   FSMoveObjectToTrashSync for an FSRef created with
-	   kFSPathMakeRefDoNotFollowLeafSymlink.  */
-	err = FSMoveObjectToTrashSync (&fref, NULL,
-				       kFSFileOperationDefaultOptions);
+      if (!mac_trash_file (SSDATA (encoded_file), &error))
+	{
+	  if (error == NULL)
+	    use_finder_p = true;
+	  else
+	    {
+	      CFStringRef error_domain = CFErrorGetDomain (error);
+	      CFStringRef reason = CFErrorCopyFailureReason (error);
+
+	      if (reason)
+		{
+		  errstring = cfstring_to_lisp (reason);
+		  CFRelease (reason);
+		}
+
+	      code = CFErrorGetCode (error);
+	      if (CFEqual (error_domain, kCFErrorDomainCocoa))
+		domain = COCOA_ERROR;
+	      else if (CFEqual (error_domain, kCFErrorDomainOSStatus))
+		domain = OSSTATUS_ERROR;
+	      else if (CFEqual (error_domain, kCFErrorDomainPOSIX))
+		domain = POSIX_ERROR;
+	      else
+		domain = OTHER_ERROR;
+
+	      CFRelease (error);
+	    }
+	}
     }
-  else
+  if (use_finder_p)
 #endif
     {
+      OSStatus err;
       const OSType finderSignature = 'MACS';
       AEDesc desc;
       AppleEvent event, reply;
@@ -2328,8 +2357,7 @@ DEFUN ("system-move-file-to-trash", Fsystem_move_file_to_trash,
 				    &handler_err, sizeof (OSStatus), NULL);
 	      if (err1 != errAEDescNotFound)
 		err = handler_err;
-	      err1 = AEGetParamDesc (&reply, keyErrorString,
-				     typeUTF8Text, /* Needs 10.2 */
+	      err1 = AEGetParamDesc (&reply, keyErrorString, typeUTF8Text,
 				     &desc);
 	      if (err1 == noErr)
 		{
@@ -2346,157 +2374,206 @@ DEFUN ("system-move-file-to-trash", Fsystem_move_file_to_trash,
 	    }
 	  AEDisposeDesc (&reply);
 	}
+      if (err != noErr)
+	{
+	  domain = OSSTATUS_ERROR;
+	  code = err;
+	}
     }
   unblock_input ();
 
-  if (err != noErr)
+  if (domain != NO_ERROR)
     {
-      errno = 0;
-      if (NILP (errstring))
+      if ((domain == OSSTATUS_ERROR && code == fnfErr)
+	  || (domain == COCOA_ERROR && code == 4)) /* NSFileNoSuchFileError */
 	{
-	  switch (err)
-	    {
-	    case fnfErr:
-	      errno = ENOENT;
-	      break;
-
-	    case afpAccessDenied:
-	      errno = EACCES;
-	      break;
-
-	    default:
-	      errstring = concat2 (build_string ("Mac error "),
-				   Fnumber_to_string (make_number (err)));
-	      break;
-	    }
+	  domain = POSIX_ERROR;
+	  code = ENOENT;
 	}
-      if (errno)
-	report_file_error ("Removing old name", list1 (filename));
+      else if ((domain == OSSTATUS_ERROR && code == afpAccessDenied)
+	       || (domain == COCOA_ERROR
+		   && code == 513)) /* NSFileWriteNoPermissionError */
+	{
+	  domain = POSIX_ERROR;
+	  code = EACCES;
+	}
+
+      if (domain == POSIX_ERROR)
+	report_file_errno ("Removing old name", list1 (filename), code);
       else
-	xsignal (Qfile_error, list3 (build_string ("Removing old name"),
-				     errstring, filename));
+	{
+	  if (NILP (errstring))
+	    {
+	      char *prefix =
+		(domain == OSSTATUS_ERROR ? "Mac error "
+		 : (domain == COCOA_ERROR ? "Cocoa error "
+		    : "other error "));
+
+	      errstring = concat2 (build_string (prefix),
+				   Fnumber_to_string (make_number (code)));
+	    }
+
+	  xsignal (Qfile_error, list3 (build_string ("Removing old name"),
+				       errstring, filename));
+	}
     }
 
   return Qnil;
 }
 
 
-/* Compile and execute the AppleScript SCRIPT and return the error
-   status as function value.  A zero is returned if compilation and
-   execution is successful, in which case *RESULT is set to a Lisp
-   string containing the resulting script value.  Otherwise, the Mac
-   error code is returned and *RESULT is set to an error Lisp string.
-   For documentation on the MacOS scripting architecture, see Inside
-   Macintosh - Interapplication Communications: Scripting
-   Components.  */
+Lisp_Object Qapp_name;
+Lisp_Object QCinfo, QCversion, QCsub_type, QCmanufacturer, QCfeatures;
 
-long
-do_applescript (Lisp_Object script, Lisp_Object *result)
-{
-  AEDesc script_desc, result_desc, error_desc, *desc = NULL;
-  OSErr error;
-  OSAError osaerror;
-  DescType desc_type;
+DEFUN ("mac-osa-language-list", Fmac_osa_language_list, Smac_osa_language_list, 0, 1, 0,
+       doc: /* Return a list of available OSA languages.
+If optional arg LONG-FORMAT-P is nil, then each element is a language
+name string.  Otherwise, each element is a cons of a language name and
+a property list of information about the language.
 
-  *result = Qnil;
-
-  if (!as_scripting_component)
-    initialize_applescript();
-
-  if (STRING_MULTIBYTE (script))
-    {
-      desc_type = typeUnicodeText;
-      script = code_convert_string_norecord (script,
-#ifdef WORDS_BIGENDIAN
-					     intern ("utf-16be"),
-#else
-					     intern ("utf-16le"),
-#endif
-					     1);
-    }
-  else
-    desc_type = typeChar;
-
-  error = AECreateDesc (desc_type, SDATA (script), SBYTES (script),
-			&script_desc);
-  if (error)
-    return error;
-
-  osaerror = OSADoScript (as_scripting_component, &script_desc, kOSANullScript,
-			  desc_type, kOSAModeNull, &result_desc);
-
-  if (osaerror == noErr)
-    /* success: retrieve resulting script value */
-    desc = &result_desc;
-  else if (osaerror == errOSAScriptError)
-    /* error executing AppleScript: retrieve error message */
-    if (!OSAScriptError (as_scripting_component, kOSAErrorMessage, desc_type,
-			 &error_desc))
-      desc = &error_desc;
-
-  if (desc)
-    {
-      *result = make_uninit_string (AEGetDescDataSize (desc));
-      AEGetDescData (desc, SDATA (*result), SBYTES (*result));
-      if (desc_type == typeUnicodeText)
-	*result = code_convert_string_norecord (*result,
-#ifdef WORDS_BIGENDIAN
-						intern ("utf-16be"),
-#else
-						intern ("utf-16le"),
-#endif
-						0);
-      AEDisposeDesc (desc);
-    }
-
-  AEDisposeDesc (&script_desc);
-
-  return osaerror;
-}
-
-
-DEFUN ("do-applescript", Fdo_applescript, Sdo_applescript, 1, 1, 0,
-       doc: /* Compile and execute AppleScript SCRIPT and return the result.
-If compilation and execution are successful, the resulting script
-value is returned as a string.  Otherwise the function aborts and
-displays the error message returned by the AppleScript scripting
-component.
-
-If SCRIPT is a multibyte string, it is regarded as a Unicode text.
-Otherwise, SCRIPT is regarded as a byte sequence in a Mac traditional
-encoding specified by `mac-system-script-code', just as in Emacs 22.
-Note that a unibyte ASCII-only SCRIPT does not always have the same
-meaning as the multibyte counterpart.  For example, `\\x5c' in a
-unibyte SCRIPT is interpreted as a yen sign when the value of
-`mac-system-script-code' is 1 (smJapanese), but the same character in
-a multibyte SCRIPT is interpreted as a reverse solidus.  You may want
-to apply `string-to-multibyte' to the script if it is given as an
-ASCII-only string literal.  */)
-  (Lisp_Object script)
+The first element of the result corresponds the default language.  */)
+  (Lisp_Object long_format_p)
 {
   Lisp_Object result;
-  long status;
-
-  CHECK_STRING (script);
 
   block_input ();
-  {
-    extern long mac_appkit_do_applescript (Lisp_Object, Lisp_Object *);
-
-    if (!inhibit_window_system)
-      status = mac_appkit_do_applescript (script, &result);
-    else
-      status = do_applescript (script, &result);
-  }
+  result = mac_osa_language_list (!NILP (long_format_p));
   unblock_input ();
-  if (status == 0)
-    return result;
-  else if (!STRINGP (result))
-    error ("AppleScript error %ld", status);
-  else
-    error ("%s", SDATA (result));
+
+  return result;
 }
 
+DEFUN ("mac-osa-compile", Fmac_osa_compile, Smac_osa_compile, 1, 3, 0,
+       doc: /* Compile CODE-OR-FILE as an OSA script.
+CODE-OR-FILE is a string specifying either a source/compiled code of
+an OSA script, or a file name for a source/compiled code.
+
+If optional 2nd arg COMPILED-P-OR-LANGUAGE is nil or a string, then it
+implies the OSA script is a source code, and specifies the OSA
+language in which the source code is written.  It should be an element
+of the result of `(mac-osa-language-list)'.  A value of nil means the
+default language.  If COMPILED-P-OR-LANGUAGE is t, then it implies
+CODE-OR-FILE itself or the contents of the file CODE-OR-FILE is a
+compiled code, and the language information is obtained from the
+compiled code.
+
+Optional 3rd arg FILE-P non-nil means CODE-OR-FILE is a file name
+rather than a source/compiled code.  */)
+  (Lisp_Object code_or_file, Lisp_Object compiled_p_or_language,
+   Lisp_Object file_p)
+{
+  Lisp_Object result, error_data;
+
+  CHECK_STRING (code_or_file);
+  if (!(NILP (compiled_p_or_language) || EQ (compiled_p_or_language, Qt)))
+    CHECK_STRING (compiled_p_or_language);
+
+  block_input ();
+  result = mac_osa_compile (code_or_file, compiled_p_or_language,
+			    !NILP (file_p), &error_data);
+  unblock_input ();
+
+  if (!NILP (error_data))
+    Fsignal (Qerror, error_data);
+
+  return result;
+}
+
+DEFUN ("mac-osa-script", Fmac_osa_script, Smac_osa_script, 1, MANY, 0,
+       doc: /* Execute CODE-OR-FILE as an OSA script.
+CODE-OR-FILE is a string specifying either a source/compiled code of
+an OSA script, or a file name for a source/compiled code.  A compiled
+code string can be generated by the function `mac-osa-compile'.
+
+If optional 2nd arg COMPILED-P-OR-LANGUAGE is nil or a string, then it
+implies the OSA script is a source code, and specifies the OSA
+language in which the source code is written.  It should be an element
+of the result of `(mac-osa-language-list)'.  A value of nil means the
+default language.  If COMPILED-P-OR-LANGUAGE is t, then it implies
+CODE-OR-FILE itself or the contents of the file CODE-OR-FILE is a
+compiled code, and the language information is obtained from the
+compiled code.
+
+Optional 3rd arg FILE-P non-nil means CODE-OR-FILE is a file name
+rather than a source/compiled code.
+
+If optional 4th arg VALUE-FORM is nil, then the return value is a
+string in the source form of the language in which the script is
+written.  If it is t, then the return value is a Lisp representation
+of the resulting Apple event descriptor (see
+`mac-ae-set-reply-parameter').  The other values are reserved for
+future use.
+
+Optional 5th arg HANDLER-CALL specifies a handler to be called in the
+context of the OSA script.  If it is a string, then a handler named
+HANDLER-CALL is called together with the arguments ARGS.  Each element
+of ARGS should be a Lisp representation of an Apple event descriptor
+(see `mac-ae-set-reply-parameter').
+
+HANDLER-CALL can be a Lisp representation of an Apple event, packing a
+handler name and arguments as follows:
+
+(let ((script "on show_message(user_message)
+tell application \\"Finder\\" to display dialog user_message
+end show_message")
+      (ae (mac-create-apple-event "ascr" "psbr" '("null"))))
+  (mac-ae-set-parameter ae "snam" '("utf8" . "show_message"))
+  (mac-ae-set-parameter ae "----" '("list" ("utf8" . "Message from my app.")))
+  (mac-osa-script script nil nil nil ae))
+
+usage: (mac-osa-script CODE-OR-FILE &optional COMPILED-P-OR-LANGUAGE FILE-P VALUE-FORM HANDLER-CALL &rest ARGS)  */)
+  (ptrdiff_t nargs, Lisp_Object *args)
+{
+  Lisp_Object result, error_data;
+  Lisp_Object code_or_file, compiled_p_or_language, file_p;
+  Lisp_Object value_form, handler_call;
+
+  nargs--;
+  code_or_file = *args++;
+  CHECK_STRING (code_or_file);
+  if (nargs <= 0)
+    compiled_p_or_language = Qnil;
+  else
+    {
+      nargs--;
+      compiled_p_or_language = *args++;
+      if (!(NILP (compiled_p_or_language) || EQ (compiled_p_or_language, Qt)))
+	CHECK_STRING (compiled_p_or_language);
+    }
+  if (nargs <= 0)
+    file_p = Qnil;
+  else
+    {
+      nargs--;
+      file_p = *args++;
+    }
+  if (nargs <= 0)
+    value_form = Qnil;
+  else
+    {
+      nargs--;
+      value_form = *args++;
+      if (!NILP (value_form) && !EQ (value_form, Qt))
+	signal_error ("VALUE-FORM should be nil or t", value_form);
+    }
+  if (nargs <= 0)
+    handler_call = Qnil;
+  else
+    {
+      nargs--;
+      handler_call = *args++;
+    }
+
+  block_input ();
+  result = mac_osa_script (code_or_file, compiled_p_or_language, !NILP (file_p),
+			   value_form, handler_call, nargs, args, &error_data);
+  unblock_input ();
+
+  if (!NILP (error_data))
+    Fsignal (Qerror, error_data);
+
+  return result;
+}
 
 DEFUN ("mac-coerce-ae-data", Fmac_coerce_ae_data, Smac_coerce_ae_data, 3, 3, 0,
        doc: /* Coerce Apple event data SRC-DATA of type SRC-TYPE to DST-TYPE.
@@ -2568,7 +2645,7 @@ return value (see `mac-convert-property-list').  FORMAT also accepts
 	  CHECK_STRING_CAR (tmp);
 	  QUIT;
 	}
-      CHECK_LIST_END (tmp, key);
+      CHECK_TYPE (NILP (tmp), Qlistp, key);
     }
   if (!NILP (application))
     CHECK_STRING (application);
@@ -2629,7 +2706,8 @@ return value (see `mac-convert-property-list').  FORMAT also accepts
  out:
   if (app_plist)
     CFRelease (app_plist);
-  CFRelease (app_id);
+  if (app_id)
+    CFRelease (app_id);
 
   unblock_input ();
 
@@ -2967,7 +3045,7 @@ mac_get_system_script_code (void)
 static int wakeup_fds[2];
 /* Whether we have read some input from wakeup_fds[0] after resetting
    this variable.  Don't access it outside the main thread.  */
-static int wokeup_from_run_loop_run_once_p;
+static bool wokeup_from_run_loop_run_once_p;
 
 static int
 read_all_from_nonblocking_fd (int fd)
@@ -3006,7 +3084,7 @@ wakeup_callback (CFSocketRef s, CFSocketCallBackType type, CFDataRef address,
 		 const void *data, void *info)
 {
   read_all_from_nonblocking_fd (CFSocketGetNative (s));
-  wokeup_from_run_loop_run_once_p = 1;
+  wokeup_from_run_loop_run_once_p = true;
 }
 #endif
 
@@ -3038,7 +3116,7 @@ init_wakeup_fds (void)
       return -1;
     dispatch_source_set_event_handler (source, ^{
 	read_all_from_nonblocking_fd (dispatch_source_get_handle (source));
-	wokeup_from_run_loop_run_once_p = 1;
+	wokeup_from_run_loop_run_once_p = true;
       });
     dispatch_resume (source);
 
@@ -3127,16 +3205,16 @@ static CFRunLoopRef select_run_loop = NULL;
 static struct
 {
   int nfds;
-  SELECT_TYPE *rfds, *wfds, *efds;
-  EMACS_TIME *timeout;
+  fd_set *rfds, *wfds, *efds;
+  struct timespec *timeout;
 } select_args;
 
 static void
 select_perform (void *info)
 {
   int qnfds = select_args.nfds;
-  SELECT_TYPE qrfds, qwfds, qefds;
-  EMACS_TIME qtimeout;
+  fd_set qrfds, qwfds, qefds;
+  struct timespec qtimeout;
   int r;
 
   if (select_args.rfds)
@@ -3163,8 +3241,8 @@ select_perform (void *info)
 }
 
 static void
-select_fire (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
-	     EMACS_TIME *timeout)
+select_fire (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
+	     struct timespec *timeout)
 {
   select_args.nfds = nfds;
   select_args.rfds = rfds;
@@ -3203,15 +3281,15 @@ select_thread_launch (void)
 #endif	/* !SELECT_USE_GCD */
 
 static int
-select_and_poll_event (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds,
-		       SELECT_TYPE *efds, EMACS_TIME *timeout)
+select_and_poll_event (int nfds, fd_set *rfds, fd_set *wfds,
+		       fd_set *efds, struct timespec const *timeout)
 {
-  int timedout_p = 0;
+  bool timedout_p = false;
   int r = 0;
-  EMACS_TIME select_timeout;
-  EventTimeout timeoutval = (timeout ? EMACS_TIME_TO_DOUBLE (*timeout)
+  struct timespec select_timeout;
+  EventTimeout timeoutval = (timeout ? timespectod (*timeout)
 			     : kEventDurationForever);
-  SELECT_TYPE orfds, owfds, oefds;
+  fd_set orfds, owfds, oefds;
 
   if (timeout == NULL)
     {
@@ -3229,13 +3307,13 @@ select_and_poll_event (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds,
       if (detect_input_pending ())
 	break;
 
-      select_timeout = make_emacs_time (0, 0);
+      select_timeout = make_timespec (0, 0);
       r = pselect (nfds, rfds, wfds, efds, &select_timeout, NULL);
       if (r != 0)
 	break;
 
       if (timeoutval == 0.0)
-	timedout_p = 1;
+	timedout_p = true;
       else
 	{
 	  /* On Mac OS X 10.7, delayed visible toolbar item validation
@@ -3257,7 +3335,7 @@ select_and_poll_event (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds,
 	  while (timeoutval && !mac_peek_next_event ()
 		 && !detect_input_pending ());
 	  if (timeoutval == 0)
-	    timedout_p = 1;
+	    timedout_p = true;
 	}
 
       if (timeout == NULL && timedout_p)
@@ -3285,13 +3363,13 @@ select_and_poll_event (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds,
 }
 
 int
-sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
-	    EMACS_TIME *timeout, void *sigmask)
+mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
+	    struct timespec const *timeout, sigset_t const *sigmask)
 {
-  int timedout_p = 0;
+  bool timedout_p = false;
   int r;
-  EMACS_TIME select_timeout;
-  SELECT_TYPE orfds, owfds, oefds;
+  struct timespec select_timeout;
+  fd_set orfds, owfds, oefds;
   EventTimeout timeoutval;
 
   if (inhibit_window_system || noninteractive
@@ -3313,8 +3391,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
   else
     FD_ZERO (&oefds);
 
-  timeoutval = (timeout ? EMACS_TIME_TO_DOUBLE (*timeout)
-		: kEventDurationForever);
+  timeoutval = (timeout ? timespectod (*timeout) : kEventDurationForever);
 
   FD_SET (0, rfds);		/* sentinel */
   do
@@ -3331,7 +3408,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
 
   /* Avoid initial overhead of RunLoop setup for the case that some
      input is already available.  */
-  select_timeout = make_emacs_time (0, 0);
+  select_timeout = make_timespec (0, 0);
   r = select_and_poll_event (nfds, rfds, wfds, efds, &select_timeout);
   if (r != 0 || timeoutval == 0.0)
     return r;
@@ -3350,9 +3427,9 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
     {
 #if SELECT_USE_GCD
       dispatch_sync (select_dispatch_queue, ^{});
-      wokeup_from_run_loop_run_once_p = 0;
+      wokeup_from_run_loop_run_once_p = false;
       dispatch_async (select_dispatch_queue, ^{
-	  SELECT_TYPE qrfds = orfds, qwfds = owfds, qefds = oefds;
+	  fd_set qrfds = orfds, qwfds = owfds, qefds = oefds;
 	  int qnfds = nfds;
 	  int r;
 
@@ -3373,7 +3450,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
       while (timeoutval && !wokeup_from_run_loop_run_once_p
 	     && !mac_peek_next_event () && !detect_input_pending ());
       if (timeoutval == 0)
-	timedout_p = 1;
+	timedout_p = true;
 
       write_one_byte_to_fd (wakeup_fds[0]);
       dispatch_async (select_dispatch_queue, ^{
@@ -3385,7 +3462,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
 
       select_sem_wait ();
       read_all_from_nonblocking_fd (wakeup_fds[1]);
-      wokeup_from_run_loop_run_once_p = 0;
+      wokeup_from_run_loop_run_once_p = false;
       select_fire (nfds, rfds, wfds, efds, NULL);
 
       do
@@ -3395,7 +3472,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
       while (timeoutval && !wokeup_from_run_loop_run_once_p
 	     && !mac_peek_next_event () && !detect_input_pending ());
       if (timeoutval == 0)
-	timedout_p = 1;
+	timedout_p = true;
 
       write_one_byte_to_fd (wakeup_fds[0]);
 #endif
@@ -3404,7 +3481,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
 
   if (!timedout_p)
     {
-      select_timeout = make_emacs_time (0, 0);
+      select_timeout = make_timespec (0, 0);
       r = select_and_poll_event (nfds, rfds, wfds, efds, &select_timeout);
       if (r != 0)
 	return r;
@@ -3425,7 +3502,7 @@ sys_select (int nfds, SELECT_TYPE *rfds, SELECT_TYPE *wfds, SELECT_TYPE *efds,
 /* Return whether the service provider for the current application is
    already registered.  */
 
-int
+bool
 mac_service_provider_registered_p (void)
 {
   name_t name = "org.gnu.Emacs";
@@ -3450,6 +3527,107 @@ mac_service_provider_registered_p (void)
   return kr == KERN_SUCCESS;
 }
 
+Lisp_Object
+mac_carbon_version_string ()
+{
+  Lisp_Object result = Qnil;
+  CFBundleRef bundle;
+  CFTypeRef value;
+
+  bundle = CFBundleGetBundleWithIdentifier (CFSTR ("com.apple.Carbon"));
+  if (bundle == NULL)
+    return result;
+
+  value = CFBundleGetValueForInfoDictionaryKey (bundle, kCFBundleVersionKey);
+  if (value && CFGetTypeID (value) == CFStringGetTypeID ())
+    result = cfstring_to_lisp_nodecode (value);
+
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1050
+  if (NILP (result))
+    {
+      CFPropertyListRef plist = NULL;
+      CFURLRef resource_url = CFBundleCopyResourceURL (bundle,
+						       CFSTR ("version"),
+						       CFSTR ("plist"), NULL);
+
+      if (resource_url)
+	{
+	  plist = cfproperty_list_create_with_url (resource_url);
+	  CFRelease (resource_url);
+	}
+      if (plist)
+	{
+	  if (CFGetTypeID (plist) == CFDictionaryGetTypeID ())
+	    {
+	      value = CFDictionaryGetValue (plist, CFSTR ("SourceVersion"));
+	      if (value && CFGetTypeID (value) == CFStringGetTypeID ())
+		{
+		  result = cfstring_to_lisp_nodecode (value);
+		  if (STRINGP (result)
+		      && CFStringHasSuffix (value, CFSTR ("0000")))
+		    result = Fsubstring (result, make_number (0),
+					 make_number (-4));
+		}
+	    }
+	  CFRelease (plist);
+	}
+    }
+#endif
+
+  return result;
+}
+
+struct mac_operating_system_version mac_operating_system_version;
+
+static void
+mac_initialize_operating_system_version ()
+{
+  const char *filename = "/System/Library/CoreServices/SystemVersion.plist";
+  CFURLRef url;
+  CFPropertyListRef plist = NULL;
+  CFDataRef data = NULL;
+
+  url = CFURLCreateFromFileSystemRepresentation (NULL, (const UInt8 *) filename,
+						 strlen (filename), false);
+  if (url)
+    {
+      plist = cfproperty_list_create_with_url (url);
+      CFRelease (url);
+    }
+  if (plist)
+    {
+      if (CFGetTypeID (plist) == CFDictionaryGetTypeID ())
+	{
+	  CFStringRef value =
+	    CFDictionaryGetValue (plist, CFSTR ("ProductVersion"));
+
+	  if (value && CFGetTypeID (value) == CFStringGetTypeID ())
+	    data = CFStringCreateExternalRepresentation (NULL, value,
+							 kCFStringEncodingUTF8,
+							 '\0');
+	}
+      CFRelease (plist);
+    }
+  if (data)
+    {
+      long major, minor, patch;
+      int nmatches;
+
+      nmatches = sscanf ((const char *) CFDataGetBytePtr (data),
+			 "%ld.%ld.%ld", &major, &minor, &patch);
+      if (nmatches == 3 || nmatches == 2)
+	{
+	  if (nmatches == 2)
+	    patch = 0;
+	  mac_operating_system_version.major = major;
+	  mac_operating_system_version.minor = minor;
+	  mac_operating_system_version.patch = patch;
+	}
+
+      CFRelease (data);
+    }
+}
+
 const char *mac_exec_path, *mac_load_path, *mac_etc_directory;
 
 /* Set up environment variables so that Emacs can correctly find its
@@ -3472,6 +3650,9 @@ init_mac_osx_environment (void)
   char *app_bundle_pathname;
   char *p, *q;
   struct stat st;
+
+  /* Initialize the operating system version.  */
+  mac_initialize_operating_system_version ();
 
   /* Initialize locale related variables.  */
   mac_system_script_code = mac_get_system_script_code ();
@@ -3599,6 +3780,13 @@ syms_of_mac (void)
 
   DEFSYM (Qmac_file_alias_p, "mac-file-alias-p");
 
+  DEFSYM (Qapp_name, "app-name");
+  DEFSYM (QCinfo, ":info");
+  DEFSYM (QCversion, ":version");
+  DEFSYM (QCsub_type, ":sub-type");
+  DEFSYM (QCmanufacturer, ":manufacturer");
+  DEFSYM (QCfeatures, ":features");
+
   DEFSYM (Qxml, "xml");
   DEFSYM (Qxml1, "xml1");
   DEFSYM (Qbinary1, "binary1");
@@ -3619,6 +3807,9 @@ syms_of_mac (void)
       DEFSYM (ae_attr_table[i].symbol, ae_attr_table[i].name);
   }
 
+  defsubr (&Smac_osa_language_list);
+  defsubr (&Smac_osa_compile);
+  defsubr (&Smac_osa_script);
   defsubr (&Smac_coerce_ae_data);
   defsubr (&Smac_get_preference);
   defsubr (&Smac_convert_property_list);
@@ -3626,7 +3817,6 @@ syms_of_mac (void)
 
   defsubr (&Smac_file_alias_p);
   defsubr (&Ssystem_move_file_to_trash);
-  defsubr (&Sdo_applescript);
 
   DEFVAR_INT ("mac-system-script-code", mac_system_script_code,
     doc: /* The system script code.  */);

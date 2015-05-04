@@ -1,6 +1,6 @@
 ;;; tramp-ftp.el --- Tramp convenience functions for Ange-FTP
 
-;; Copyright (C) 2002-2013 Free Software Foundation, Inc.
+;; Copyright (C) 2002-2015 Free Software Foundation, Inc.
 
 ;; Author: Michael Albinus <michael.albinus@gmx.de>
 ;; Keywords: comm, processes
@@ -30,11 +30,13 @@
 
 (require 'tramp)
 
+;; Pacify byte-compiler.
 (eval-when-compile
-
-  ;; Pacify byte-compiler.
   (require 'cl)
   (require 'custom))
+(defvar ange-ftp-ftp-name-arg)
+(defvar ange-ftp-ftp-name-res)
+(defvar ange-ftp-name-format)
 
 ;; Disable Ange-FTP from file-name-handler-alist.
 ;; To handle EFS, the following functions need to be dealt with:
@@ -118,17 +120,6 @@ present for backward compatibility."
      tramp-ftp-method
      '((tramp-parse-netrc "~/.netrc"))))
 
-;; If there is URL syntax, `substitute-in-file-name' needs special
-;; handling.
-(put 'substitute-in-file-name 'ange-ftp 'tramp-handle-substitute-in-file-name)
-(add-hook 'tramp-ftp-unload-hook
-	  (lambda ()
-            (setplist 'substitute-in-file-name
-                      (delete 'ange-ftp
-                              (delete 'tramp-handle-substitute-in-file-name
-                                      (symbol-plist
-                                       'substitute-in-file-name))))))
-
 ;;;###tramp-autoload
 (defun tramp-ftp-file-name-handler (operation &rest args)
   "Invoke the Ange-FTP handler for OPERATION.
@@ -170,7 +161,7 @@ pass to the OPERATION."
        ;; We must copy it locally first, because there is no place in
        ;; ange-ftp for correct handling.
        ((and (memq operation '(copy-file rename-file))
-	     (file-remote-p (cadr args))
+	     (tramp-tramp-file-p (cadr args))
 	     (not (tramp-ftp-file-name-p (cadr args))))
 	(let* ((filename (car args))
 	       (newname (cadr args))
@@ -187,12 +178,7 @@ pass to the OPERATION."
 	    (ignore-errors (delete-file tmpfile)))))
 
        ;; Normally, the handlers must be discarded.
-       ;; `inhibit-file-name-handlers' isn't sufficient, because the
-       ;; local file name could be in Tramp syntax as well (for
-       ;; example, returning VMS file names like "/DISK$CAM:/AAA").
-       ;; That's why we set also `tramp-mode' to nil.
-       (t (let* (;(tramp-mode nil)
-		 (inhibit-file-name-handlers
+       (t (let* ((inhibit-file-name-handlers
 		  (list 'tramp-file-name-handler
 			'tramp-completion-file-name-handler
 			(and (eq inhibit-file-name-operation operation)
@@ -200,6 +186,8 @@ pass to the OPERATION."
 		 (inhibit-file-name-operation operation))
 	    (apply 'ange-ftp-hook-function operation args)))))))
 
+;; It must be a `defsubst' in order to push the whole code into
+;; tramp-loaddefs.el.  Otherwise, there would be recursive autoloading.
 ;;;###tramp-autoload
 (defsubst tramp-ftp-file-name-p (filename)
   "Check if it's a filename that should be forwarded to Ange-FTP."

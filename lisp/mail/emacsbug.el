@@ -1,10 +1,10 @@
 ;;; emacsbug.el --- command to report Emacs bugs to appropriate mailing list
 
-;; Copyright (C) 1985, 1994, 1997-1998, 2000-2013 Free Software
+;; Copyright (C) 1985, 1994, 1997-1998, 2000-2015 Free Software
 ;; Foundation, Inc.
 
 ;; Author: K. Shane Hartman
-;; Maintainer: FSF
+;; Maintainer: emacs-devel@gnu.org
 ;; Keywords: maint mail
 ;; Package: emacs
 
@@ -64,10 +64,6 @@
   :type 'boolean)
 
 ;; User options end here.
-
-(defvar report-emacs-bug-tracker-url "http://debbugs.gnu.org/cgi/"
-  "Base URL of the GNU bugtracker.
-Used for querying duplicates and linking to existing bugs.")
 
 (defvar report-emacs-bug-orig-text nil
   "The automatically-created initial text of the bug report.")
@@ -151,13 +147,18 @@ This requires either the OS X \"open\" command, or the freedesktop
 			   (concat "mailto:" to)))
 	(error "Subject, To or body not found")))))
 
+;; It's the default mail mode, so it seems OK to use its features.
+(autoload 'message-bogus-recipient-p "message")
+(autoload 'message-make-address "message")
+(defvar message-send-mail-function)
+(defvar message-sendmail-envelope-from)
+
 ;;;###autoload
-(defun report-emacs-bug (topic &optional recent-keys)
+(defun report-emacs-bug (topic &optional unused)
   "Report a bug in GNU Emacs.
 Prompts for bug subject.  Leaves you in a mail buffer."
-  ;; This strange form ensures that (recent-keys) is the value before
-  ;; the bug subject string is read.
-  (interactive (reverse (list (recent-keys) (read-string "Bug Subject: "))))
+  (declare (advertised-calling-convention (topic) "24.5"))
+  (interactive "sBug Subject: ")
   ;; The syntax `version;' is preferred to `[version]' because the
   ;; latter could be mistakenly stripped by mailing software.
   (if (eq system-type 'ms-dos)
@@ -169,16 +170,11 @@ Prompts for bug subject.  Leaves you in a mail buffer."
 				report-emacs-bug-mac-address
 			      report-emacs-bug-address))
 	 (from-buffer (current-buffer))
-	 ;; Put these properties on semantically-void text.
-	 ;; report-emacs-bug-hook deletes these regions before sending.
-	 (prompt-properties '(field emacsbug-prompt
-			      intangible but-helpful
-			      rear-nonsticky t))
 	 (can-insert-mail (or (report-emacs-bug-can-use-xdg-email)
 			      (report-emacs-bug-can-use-osx-open)))
 	 user-point message-end-point)
     (setq message-end-point
-	  (with-current-buffer (get-buffer-create "*Messages*")
+	  (with-current-buffer (messages-buffer)
 	    (point-max-marker)))
     (compose-mail reporting-address topic)
     ;; The rest of this does not execute if the user was asked to
@@ -188,7 +184,12 @@ Prompts for bug subject.  Leaves you in a mail buffer."
       ;; that report-emacs-bug-orig-text remains valid.  (Bug#5178)
       (message-sort-headers)
       ;; Stop message-mode stealing the properties we will add.
-      (set (make-local-variable 'message-strip-special-text-properties) nil))
+      (set (make-local-variable 'message-strip-special-text-properties) nil)
+      ;; Make sure we default to the From: address as envelope when sending
+      ;; through sendmail.
+      (when (and (not message-sendmail-envelope-from)
+		 (message-bogus-recipient-p (message-make-address)))
+	(set (make-local-variable 'message-sendmail-envelope-from) 'header)))
     (rfc822-goto-eoh)
     (forward-line 1)
     ;; Move the mail signature to the proper place.
@@ -211,7 +212,7 @@ Prompts for bug subject.  Leaves you in a mail buffer."
 	      (insert ".\nOther bugs should be sent to the place you are guided with\n"
 		      "M-x report-emacs-bug on some official ports such as X11 or NS.\n\n")))
 	(insert "This bug report will be sent to the ")
-	(insert-button
+	(insert-text-button
 	 "Bug-GNU-Emacs"
 	 'face 'link
 	 'help-echo (concat "mouse-2, RET: Follow this link")
@@ -219,7 +220,7 @@ Prompts for bug subject.  Leaves you in a mail buffer."
 		   (browse-url "http://lists.gnu.org/archive/html/bug-gnu-emacs/"))
 	 'follow-link t)
 	(insert " mailing list\nand the GNU bug tracker at ")
-	(insert-button
+	(insert-text-button
 	 "debbugs.gnu.org"
 	 'face 'link
 	 'help-echo (concat "mouse-2, RET: Follow this link")
@@ -237,11 +238,10 @@ usually do not have translators for other languages.\n\n")))
     (insert "Please describe exactly what actions triggered the bug, and\n"
 	    "the precise symptoms of the bug.  If you can, give a recipe\n"
 	    "starting from `emacs -Q':\n\n")
-    (add-text-properties (save-excursion
-                           (rfc822-goto-eoh)
-                           (line-beginning-position 2))
-                         (point)
-                         prompt-properties)
+    (let ((txt (delete-and-extract-region
+                (save-excursion (rfc822-goto-eoh) (line-beginning-position 2))
+                (point))))
+      (insert (propertize "\n" 'display txt)))
     (setq user-point (point))
     (insert "\n\n")
 
@@ -253,11 +253,12 @@ usually do not have translators for other languages.\n\n")))
       (if (file-readable-p debug-file)
 	  (insert "For information about debugging Emacs, please read the file\n"
 		  debug-file ".\n")))
-    (add-text-properties (1+ user-point) (point) prompt-properties)
+    (let ((txt (delete-and-extract-region (1+ user-point) (point))))
+      (insert (propertize "\n" 'display txt)))
 
     (insert "\n\nIn " (emacs-version) "\n")
-    (if (stringp emacs-bzr-version)
-	(insert "Bzr revision: " emacs-bzr-version "\n"))
+    (if (stringp emacs-repository-version)
+	(insert "Repository revision: " emacs-repository-version "\n"))
     (if (fboundp 'x-server-vendor)
 	(condition-case nil
             ;; This is used not only for X11 but also W32 and others.
@@ -286,8 +287,11 @@ usually do not have translators for other languages.\n\n")))
        "LC_ALL" "LC_COLLATE" "LC_CTYPE" "LC_MESSAGES"
        "LC_MONETARY" "LC_NUMERIC" "LC_TIME" "LANG" "XMODIFIERS"))
     (insert (format "  locale-coding-system: %s\n" locale-coding-system))
-    (insert (format "  default enable-multibyte-characters: %s\n"
-		    (default-value 'enable-multibyte-characters)))
+    ;; Only ~ 0.2% of people from a sample of 3200 changed this from
+    ;; the default, t.
+    (or (default-value 'enable-multibyte-characters)
+	(insert (format "  default enable-multibyte-characters: %s\n"
+			(default-value 'enable-multibyte-characters))))
     (insert "\n")
     (insert (format "Major mode: %s\n"
 		    (format-mode-line
@@ -299,23 +303,6 @@ usually do not have translators for other languages.\n\n")))
       (and (boundp mode) (buffer-local-value mode from-buffer)
 	   (insert (format "  %s: %s\n" mode
 			   (buffer-local-value mode from-buffer)))))
-    (insert "\n")
-    (insert "Recent input:\n")
-    (let ((before-keys (point)))
-      (insert (mapconcat (lambda (key)
-			   (if (or (integerp key)
-				   (symbolp key)
-				   (listp key))
-			       (single-key-description key)
-			     (prin1-to-string key nil)))
-			 (or recent-keys (recent-keys))
-			 " "))
-      (save-restriction
-	(narrow-to-region before-keys (point))
-	(goto-char before-keys)
-	(while (progn (move-to-column 50) (not (eobp)))
-	  (search-forward " " nil t)
-	  (insert "\n"))))
     (let ((message-buf (get-buffer "*Messages*")))
       (if message-buf
 	  (let (beg-pos
@@ -324,7 +311,7 @@ usually do not have translators for other languages.\n\n")))
 	      (goto-char end-pos)
 	      (forward-line -10)
 	      (setq beg-pos (point)))
-	    (insert "\n\nRecent messages:\n")
+	    (insert "\nRecent messages:\n")
 	    (insert-buffer-substring message-buf beg-pos end-pos))))
     ;; After Recent messages, to avoid the messages produced by
     ;; list-load-path-shadows.
@@ -345,6 +332,10 @@ usually do not have translators for other languages.\n\n")))
                 shadows)))
     (insert (format "\nFeatures:\n%s\n" features))
     (fill-region (line-beginning-position 0) (point))
+
+    (insert (format "\nMemory information:\n"))
+    (pp (garbage-collect) (current-buffer))
+    
     ;; This is so the user has to type something in order to send easily.
     (use-local-map (nconc (make-sparse-keymap) (current-local-map)))
     (define-key (current-local-map) "\C-c\C-i" 'info-emacs-bug)
@@ -386,10 +377,6 @@ usually do not have translators for other languages.\n\n")))
 
 (define-obsolete-function-alias 'report-emacs-bug-info 'info-emacs-bug "24.3")
 
-;; It's the default mail mode, so it seems OK to use its features.
-(autoload 'message-bogus-recipient-p "message")
-(defvar message-send-mail-function)
-
 (defun report-emacs-bug-hook ()
   "Do some checking before sending a bug report."
   (save-excursion
@@ -422,7 +409,7 @@ and send the mail again%s."
                             (format " using \\[%s]"
                                     report-emacs-bug-send-command)
                           "")))))
-      (error "M-x report-emacs-bug was cancelled, please read *Bug Help* buffer"))
+      (error "M-x report-emacs-bug was canceled, please read *Bug Help* buffer"))
     ;; Query the user for the SMTP method, so that we can skip
     ;; questions about From header validity if the user is going to
     ;; use mailclient, anyway.
@@ -451,100 +438,8 @@ and send the mail again%s."
 				 from))
 	       (not (yes-or-no-p
 		     (format "Is `%s' really your email address? " from)))
-	       (error "Please edit the From address and try again"))))
-    ;; Delete the uninteresting text that was just to help fill out the report.
-    (rfc822-goto-eoh)
-    (forward-line 1)
-    (let ((pos (1- (point))))
-      (while (setq pos (text-property-any pos (point-max)
-                                          'field 'emacsbug-prompt))
-        (delete-region pos (field-end (1+ pos)))))))
+	       (error "Please edit the From address and try again"))))))
 
-
-;; Querying the bug database
-
-(defvar report-emacs-bug-bug-alist nil)
-(make-variable-buffer-local 'report-emacs-bug-bug-alist)
-(defvar report-emacs-bug-choice-widget nil)
-(make-variable-buffer-local 'report-emacs-bug-choice-widget)
-
-(defun report-emacs-bug-create-existing-bugs-buffer (bugs keywords)
-  (switch-to-buffer (get-buffer-create "*Existing Emacs Bugs*"))
-  (setq buffer-read-only t)
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (setq report-emacs-bug-bug-alist bugs)
-    (widget-insert (propertize (concat "Already known bugs ("
-				       keywords "):\n\n")
-			       'face 'bold))
-    (if bugs
-	(setq report-emacs-bug-choice-widget
-	      (apply 'widget-create 'radio-button-choice
-		     :value (caar bugs)
-		     (let (items)
-		       (dolist (bug bugs)
-			 (push (list
-				'url-link
-				:format (concat "Bug#" (number-to-string (nth 2 bug))
-						": " (cadr bug) "\n    %[%v%]\n")
-				;; FIXME: Why is only the link of the
-				;; active item clickable?
-				(car bug))
-			       items))
-		       (nreverse items))))
-      (widget-insert "No bugs matching your keywords found.\n"))
-    (widget-insert "\n")
-    (widget-create 'push-button
-		   :notify (lambda (&rest ignore)
-			     ;; TODO: Do something!
-			     (message "Reporting new bug!"))
-		   "Report new bug")
-    (when bugs
-      (widget-insert " ")
-      (widget-create 'push-button
-		     :notify (lambda (&rest ignore)
-			       (let ((val (widget-value report-emacs-bug-choice-widget)))
-				 ;; TODO: Do something!
-				 (message "Appending to bug %s!"
-					  (nth 2 (assoc val report-emacs-bug-bug-alist)))))
-		     "Append to chosen bug"))
-    (widget-insert " ")
-    (widget-create 'push-button
-		   :notify (lambda (&rest ignore)
-			     (kill-buffer))
-		   "Quit reporting bug")
-    (widget-insert "\n"))
-  (use-local-map widget-keymap)
-  (widget-setup)
-  (goto-char (point-min)))
-
-(defun report-emacs-bug-parse-query-results (status keywords)
-  (goto-char (point-min))
-  (let (buglist)
-    (while (re-search-forward "<a href=\"bugreport\\.cgi\\?bug=\\([[:digit:]]+\\)\">\\([^<]+\\)</a>" nil t)
-      (let ((number (match-string 1))
-	    (subject (match-string 2)))
-	(when (not (string-match "^#" subject))
-	  (push (list
-		 ;; first the bug URL
-		 (concat report-emacs-bug-tracker-url
-			 "bugreport.cgi?bug=" number)
-		 ;; then the subject and number
-		 subject (string-to-number number))
-		buglist))))
-    (report-emacs-bug-create-existing-bugs-buffer (nreverse buglist) keywords)))
-
-(defun report-emacs-bug-query-existing-bugs (keywords)
-  "Query for KEYWORDS at `report-emacs-bug-tracker-url', and return the result.
-The result is an alist with items of the form (URL SUBJECT NO)."
-  (interactive "sBug keywords (comma separated): ")
-  (url-retrieve (concat report-emacs-bug-tracker-url
-			"pkgreport.cgi?include=subject%3A"
-			(replace-regexp-in-string "[[:space:]]+" "+" keywords)
-			";package=emacs")
-		'report-emacs-bug-parse-query-results (list keywords)))
-(make-obsolete 'report-emacs-bug-query-existing-bugs
-	       "use the `debbugs' package from GNU ELPA instead." "24.3")
 
 (provide 'emacsbug)
 

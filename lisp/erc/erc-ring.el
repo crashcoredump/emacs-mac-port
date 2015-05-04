@@ -1,9 +1,9 @@
 ;; erc-ring.el -- Command history handling for erc using ring.el
 
-;; Copyright (C) 2001-2004, 2006-2013 Free Software Foundation, Inc.
+;; Copyright (C) 2001-2004, 2006-2015 Free Software Foundation, Inc.
 
 ;; Author: Alex Schroeder <alex@gnu.org>
-;; Maintainer: FSF
+;; Maintainer: emacs-devel@gnu.org
 ;; Keywords: comm
 ;; URL: http://www.emacswiki.org/cgi-bin/wiki.pl?ErcHistory
 
@@ -38,6 +38,10 @@
 (require 'comint)
 (require 'ring)
 
+(defgroup erc-ring nil
+  "An input ring for ERC."
+  :group 'erc)
+
 ;;;###autoload (autoload 'erc-ring-mode "erc-ring" nil t)
 (define-erc-module ring nil
   "Stores input in a ring so that previous commands and messages can
@@ -63,7 +67,8 @@ variable.")
 (defun erc-input-ring-setup ()
   "Do the setup required so that we can use comint style input rings.
 Call this function when setting up the mode."
-  (setq erc-input-ring (make-ring comint-input-ring-size))
+  (unless (ring-p erc-input-ring)
+    (setq erc-input-ring (make-ring comint-input-ring-size)))
   (setq erc-input-ring-index nil))
 
 (defun erc-add-to-input-ring (s)

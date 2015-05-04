@@ -1,5 +1,5 @@
 /* Heap management routines for GNU Emacs on the Microsoft Windows API.
-   Copyright (C) 1994, 2001-2013 Free Software Foundation, Inc.
+   Copyright (C) 1994, 2001-2015 Free Software Foundation, Inc.
 
 This file is part of GNU Emacs.
 
@@ -78,7 +78,7 @@ allocate_heap (void)
   while (!ptr && (base < end))
     {
 #ifdef _WIN64
-      reserved_heap_size = min(end - base, 0x4000000000i64); /* Limit to 256Gb */
+      reserved_heap_size = min(end - base, 0x4000000000ull); /* Limit to 256Gb */
 #else
       reserved_heap_size = end - base;
 #endif
@@ -96,7 +96,7 @@ static char *
 allocate_heap (void)
 {
 #ifdef _WIN64
-  size_t size = 0x4000000000i64; /* start by asking for 32GB */
+  size_t size = 0x4000000000ull; /* start by asking for 256GB */
 #else
   /* We used to start with 2GB here, but on Windows 7 that would leave
      too little room in the address space for threads started by
@@ -106,7 +106,7 @@ allocate_heap (void)
 #endif
   void *ptr = NULL;
 
-  while (!ptr && size > 0x00100000)
+  while (!ptr && size >= 0x00800000)
     {
       reserved_heap_size = size;
       ptr = VirtualAlloc (NULL,

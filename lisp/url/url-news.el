@@ -1,6 +1,6 @@
 ;;; url-news.el --- News Uniform Resource Locator retrieval code
 
-;; Copyright (C) 1996-1999, 2004-2013 Free Software Foundation, Inc.
+;; Copyright (C) 1996-1999, 2004-2015 Free Software Foundation, Inc.
 
 ;; Keywords: comm, data, processes
 
@@ -28,9 +28,10 @@
 (autoload 'url-warn "url")
 (autoload 'gnus-group-read-ephemeral-group "gnus-group")
 
-(defgroup url-news nil
-  "News related options."
-  :group 'url)
+;; Unused.
+;;; (defgroup url-news nil
+;;;   "News related options."
+;;;   :group 'url)
 
 (defun url-news-open-host (host port user pass)
   (if (fboundp 'nnheader-init-server-buffer)
@@ -69,8 +70,7 @@
 		"    </xmp>\n"
 		"   </p>\n"
 		"   <p>\n"
-		"    If you If you feel this is an error, <a href=\""
-		"mailto:" url-bug-address "\">send mail</a>\n"
+		"    If you feel this is an error, M-x report-emacs-bug RET.\n"
 		"   </p>\n"
 		"  </div>\n"
 		" </body>\n"

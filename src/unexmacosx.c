@@ -1,5 +1,5 @@
 /* Dump Emacs in Mach-O format for use on Mac OS X.
-   Copyright (C) 2001-2013 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
 
 This file is part of GNU Emacs.
 
@@ -97,6 +97,7 @@ along with GNU Emacs.  If not, see <http://www.gnu.org/licenses/>.  */
 #undef free
 
 #include "unexec.h"
+#include "lisp.h"
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -880,6 +881,27 @@ copy_data_segment (struct load_command *lc)
 	  if (!unexec_write (header_offset, sectp, sizeof (struct section)))
 	    unexec_error ("cannot write section %.16s's header", sectp->sectname);
 	}
+      else if (strncmp (sectp->sectname, "__bss", 5) == 0
+	       || strncmp (sectp->sectname, "__pu_bss", 8) == 0)
+	{
+	  sectp->flags = S_REGULAR;
+
+	  /* These sections are produced by GCC 4.6+.
+
+	     FIXME: We possibly ought to clear uninitialized local
+	     variables in statically linked libraries like for
+	     SECT_BSS (__bss) above, but setting up the markers we
+	     need in lastfile.c would be rather messy. See
+	     darwin_output_aligned_bss () in gcc/config/darwin.c for
+	     the root of the problem, keeping in mind that the
+	     sections are numbered by their alignment in GCC 4.6, but
+	     by log2(alignment) in GCC 4.7. */
+
+	  if (!unexec_write (sectp->offset, (void *) sectp->addr, sectp->size))
+	    unexec_error ("cannot copy section %.16s", sectp->sectname);
+	  if (!unexec_write (header_offset, sectp, sizeof (struct section)))
+	    unexec_error ("cannot write section %.16s's header", sectp->sectname);
+	}
       else if (strncmp (sectp->sectname, "__la_symbol_ptr", 16) == 0
 	       || strncmp (sectp->sectname, "__nl_symbol_ptr", 16) == 0
 	       || strncmp (sectp->sectname, "__got", 16) == 0
@@ -891,6 +913,7 @@ copy_data_segment (struct load_command *lc)
 	       || strncmp (sectp->sectname, "__program_vars", 16) == 0
 	       || strncmp (sectp->sectname, "__mod_init_func", 16) == 0
 	       || strncmp (sectp->sectname, "__mod_term_func", 16) == 0
+	       || strncmp (sectp->sectname, "__static_data", 16) == 0
 	       || strncmp (sectp->sectname, "__objc_", 7) == 0)
 	{
 	  if (!unexec_copy (sectp->offset, old_file_offset, sectp->size))
@@ -1345,7 +1368,9 @@ dump_it (void)
       }
 
   if (curr_header_offset > text_seg_lowest_offset)
-    unexec_error ("not enough room for load commands for new __DATA segments");
+    unexec_error ("not enough room for load commands for new __DATA segments"
+		  " (increase headerpad_extra in configure.in to at least %lX)",
+		  num_unexec_regions * sizeof (struct segment_command));
 
   printf ("%ld unused bytes follow Mach-O header\n",
 	  text_seg_lowest_offset - curr_header_offset);
@@ -1366,16 +1391,16 @@ unexec (const char *outfile, const char *infile)
     unexec_error ("Unexec from a dumped executable is not supported.");
 
   pagesize = getpagesize ();
-  infd = open (infile, O_RDONLY, 0);
+  infd = emacs_open (infile, O_RDONLY, 0);
   if (infd < 0)
     {
       unexec_error ("cannot open input file `%s'", infile);
     }
 
-  outfd = open (outfile, O_WRONLY | O_TRUNC | O_CREAT, 0755);
+  outfd = emacs_open (outfile, O_WRONLY | O_TRUNC | O_CREAT, 0755);
   if (outfd < 0)
     {
-      close (infd);
+      emacs_close (infd);
       unexec_error ("cannot open output file `%s'", outfile);
     }
 
@@ -1389,7 +1414,7 @@ unexec (const char *outfile, const char *infile)
 
   dump_it ();
 
-  close (outfd);
+  emacs_close (outfd);
 }
 
 
